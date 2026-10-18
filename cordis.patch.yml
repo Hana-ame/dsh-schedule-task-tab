@@ -1,0 +1,3 @@
+- insert:
+    - id: schedule-task-tab
+      name: '@local/schedule-task-tab'
