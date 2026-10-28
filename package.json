@@ -4,9 +4,16 @@
   "description": "会话注入管理（inject-manager）：人工创建定时注入任务，到点触发子代理读取主会话上下文与 per-session memo（工具拉取），分析后将回应注入主会话唤醒主 agent；含全局模板库与 memo 编辑。",
   "private": true,
   "type": "module",
-  "exports": { ".": "./index.js", "./client": "./client.js" },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,

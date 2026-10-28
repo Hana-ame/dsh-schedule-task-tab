@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Scheduled Session Injection",
+    "description": "Create scheduled injection tasks that wake a subagent to read the main session and act per session."
+  }
+}
