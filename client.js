@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: '@local/schedule-task-tab',
+  id: 'dsh-schedule-task-tab',
   factory(require) {
     const react = require('react');
     const { jsx, jsxs } = require('react/jsx-runtime');
@@ -225,13 +225,13 @@ window.__ModuleLoader__.load({
       '.inj-empty{padding:14px;text-align:center;font-size:12px;opacity:.55;border:1px dashed rgba(127,127,127,.25);border-radius:10px}' +
       '.inj-groupLabel{font-size:11px;font-weight:600;opacity:.55;margin-top:4px;font-family:ui-monospace,monospace}';
 
-    const TAG = '@local/schedule-task-tab/styles';
+    const TAG = 'dsh-schedule-task-tab/styles';
     function ensureStyles() {
       if (typeof document === 'undefined') return;
       if (document.querySelector('style[data-plugin-css="' + TAG + '"]')) return;
       const tag = document.createElement('style');
       tag.setAttribute('data-plugin-css', TAG);
-      tag.dataset.plugin = '@local/schedule-task-tab';
+      tag.dataset.plugin = 'dsh-schedule-task-tab';
       tag.textContent = CSS;
       document.head.appendChild(tag);
     }
