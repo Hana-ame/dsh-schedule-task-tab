@@ -1,6 +1,6 @@
 {
   "name": "dsh-schedule-task-tab",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "会话审阅注入（inject-manager）：每次主会话一轮对话结束后触发子代理，读取对话内容后审阅，判断是否注入主会话唤醒主 agent；含全局模板库与审阅记录。不再使用定时器（与 schedule 功能重复，已移除）。",
   "author": "nanaka",
   "private": true,

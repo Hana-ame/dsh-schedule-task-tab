@@ -401,3 +401,18 @@ test('review subagent gets a child-scope guard for the two injection tools only'
   assert.match(String(guard.fn({ name: 'list_agents' })), /只允许调用/);
   assert.equal(guard.active, false, 'guard must be released when the review run settles');
 });
+
+test('configured reasoningEffort rides along in the subagent agentOptions', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask({ provider: 'sensenova', model: '6.8-flash-lite', reasoningEffort: 'high' }) },
+    subagentScript: async () => {},
+  });
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+  assert.deepEqual(harness.startCalls[0].options.agentOptions, {
+    provider: 'sensenova',
+    model: '6.8-flash-lite',
+    reasoningEffort: 'high',
+  });
+});

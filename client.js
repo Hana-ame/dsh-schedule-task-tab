@@ -5,6 +5,22 @@ window.__ModuleLoader__.load({
     const { jsx, jsxs } = require('react/jsx-runtime');
     require('@deepseek-ai/cordis');
 
+    /** 可选复用 dsh-gear-grid-model 导出的 GearGridPicker（懒加载，失败返回 null 走 fallback）。 */
+    let gearGridPromise = null;
+    function loadGearGrid() {
+      if (gearGridPromise) return gearGridPromise;
+      gearGridPromise = (async () => {
+        try {
+          const load = typeof require.async === 'function' ? require.async.bind(require) : null;
+          const mod = load ? await load('dsh-gear-grid-model') : require('dsh-gear-grid-model');
+          return mod && typeof mod.GearGridPicker === 'function' ? mod : null;
+        } catch {
+          return null;
+        }
+      })();
+      return gearGridPromise;
+    }
+
     /** Locale namespace for this tab. */
     const NS = 'scheduleTaskTab';
     /** The view id this package owns, shown in the conversation tablist. */
@@ -44,7 +60,11 @@ window.__ModuleLoader__.load({
       'task.name.placeholder': '例如：轮末检查还有没有没做完的事',
       'task.name.hint': '名称会显示在面板和注入消息的前缀里',
       'task.model.hint': '留空就跟随主会话的默认模型，一般不用改',
+      'task.model': '子代理模型',
       'task.model.default': '跟随会话默认模型',
+      'task.model.clear': '恢复默认',
+      'task.model.loading': '正在加载模型选择器…',
+      'task.model.fallback': 'Gear Grid 选择器不可用，已回退为下拉框',
       'task.prompt': '审阅指令',
       'task.prompt.hint': '留空使用内置默认指令：读上下文 → 找待办/遗漏/风险 → 需要时注入；可用占位符 {sessionId} {taskName} {turn} {reason}',
       'task.prompt.placeholder': '留空 = 使用内置默认审阅指令',
@@ -141,7 +161,11 @@ window.__ModuleLoader__.load({
       'task.name.placeholder': 'e.g. Check for unfinished work at turn end',
       'task.name.hint': 'Shown in this panel and in the nudge prefix',
       'task.model.hint': 'Leave empty to follow the session default',
+      'task.model': 'Subagent model',
       'task.model.default': 'Session default model',
+      'task.model.clear': 'Use default',
+      'task.model.loading': 'Loading model picker…',
+      'task.model.fallback': 'Gear Grid picker unavailable — using plain selects',
       'task.prompt': 'Review instruction',
       'task.prompt.hint': 'Leave empty for the built-in instruction: read context → find follow-ups/omissions/risks → inject when needed. Placeholders: {sessionId} {taskName} {turn} {reason}',
       'task.prompt.placeholder': 'Empty = use the built-in review instruction',
@@ -289,6 +313,12 @@ window.__ModuleLoader__.load({
       '.inj-check{display:inline-flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;user-select:none}' +
       '.inj-inlineRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap}' +
       '.inj-inlineRow .inj-select{flex:1;min-width:170px;width:auto}' +
+      '.inj-modelRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}' +
+      '.inj-modelPick{display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(127,127,127,.35);border-radius:10px;background:rgba(127,127,127,.04);color:inherit;font:inherit;font-size:13px;padding:7px 12px;cursor:pointer;max-width:100%;min-width:0}' +
+      '.inj-modelPick:hover{border-color:rgba(37,99,235,.55);background:rgba(37,99,235,.06)}' +
+      '.inj-modelPick.empty .inj-modelName{opacity:.6;font-weight:500}' +
+      '.inj-modelName{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;min-width:0}' +
+      '.inj-modelChev{opacity:.5;font-size:11px}' +
       '.inj-formActions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}' +
       '.inj-formFooter{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-top:1px dashed rgba(127,127,127,.25);padding-top:10px}' +
       '.inj-hint{font-size:11px;opacity:.55;line-height:1.55}' +
@@ -463,13 +493,143 @@ window.__ModuleLoader__.load({
       ] });
     }
 
+    /* ── 子代理模型选择：Gear Grid（复用 dsh-gear-grid-model）+ 下拉框回退 ── */
+
+    /** 把 provider/model/effort id 映射成目录里的可读名字。 */
+    function describeModel(groups, provider, model, reasoningEffort) {
+      const group = (groups || []).find((g) => g.id === provider) || null;
+      const info = group ? (group.models || []).find((m) => m.id === model) || null : null;
+      const label = !provider || !model
+        ? null
+        : `${group ? (group.name || group.id) : provider} / ${info ? (info.name || info.id) : model}`;
+      let effort = null;
+      if (reasoningEffort) {
+        const found = info && info.reasoning ? (info.reasoning.efforts || []).find((e) => e.id === reasoningEffort) : null;
+        effort = found ? (found.name || found.id) : reasoningEffort;
+      }
+      return { label, effort };
+    }
+
+    function GearModelField({ provider, model, reasoningEffort, catalog, t, gearT, onChange }) {
+      const [gear, setGear] = react.useState(null);
+      const [gearTried, setGearTried] = react.useState(false);
+      const [open, setOpen] = react.useState(false);
+      const [tab, setTab] = react.useState(null);
+
+      react.useEffect(() => {
+        let alive = true;
+        loadGearGrid().then((mod) => {
+          if (!alive) return;
+          if (mod) { try { mod.ensureGearGridStyles?.(); } catch { /* styles are cosmetic */ } }
+          setGear(mod);
+          setGearTried(true);
+        });
+        return () => { alive = false; };
+      }, []);
+
+      const groups = catalog?.groups ?? [];
+      const group = groups.find((g) => g.id === provider) || null;
+      const models = group ? (group.models ?? []) : [];
+      const hasSelection = !!(provider && model);
+      const described = describeModel(groups, provider, model, reasoningEffort);
+      const emit = (next) => onChange({
+        provider: next.provider ?? provider,
+        model: next.model ?? model,
+        reasoningEffort: next.reasoningEffort ?? reasoningEffort,
+      });
+
+      const fallback = jsxs(react.Fragment, { children: [
+        jsxs('div', { className: 'inj-formGrid', children: [
+          jsxs('div', { className: 'inj-field', children: [
+            jsx('label', { className: 'inj-label', children: t('provider') }),
+            jsx('select', {
+              className: 'inj-select',
+              value: provider,
+              onChange: (e) => emit({ provider: e.target.value, model: '', reasoningEffort: '' }),
+              children: [
+                jsx('option', { value: '', children: t('task.model.default') }),
+                groups.map((g) => jsx('option', { key: g.id, value: g.id, children: g.name || g.id })),
+              ],
+            }),
+          ] }),
+          jsxs('div', { className: 'inj-field', children: [
+            jsx('label', { className: 'inj-label', children: t('model') }),
+            jsx('select', {
+              className: 'inj-select',
+              value: model,
+              disabled: !provider,
+              onChange: (e) => emit({ model: e.target.value }),
+              children: [
+                jsx('option', { value: '', children: '—' }),
+                models.map((m) => jsx('option', { key: m.id, value: m.id, children: m.name || m.id })),
+              ],
+            }),
+          ] }),
+        ] }),
+        jsx('div', { className: 'inj-hint', children: t('task.model.hint') }),
+      ] });
+
+      const picker = open && gear
+        ? jsx(gear.GearGridPicker, {
+            t: gearT,
+            state: { status: catalog ? 'ready' : 'loading', groups },
+            current: hasSelection
+              ? { provider, model, ...(reasoningEffort ? { reasoningEffort } : {}) }
+              : null,
+            tab,
+            onTab: setTab,
+            onSelect: (selection) => {
+              setOpen(false);
+              onChange({
+                provider: selection.provider,
+                model: selection.model,
+                reasoningEffort: selection.reasoningEffort ?? '',
+              });
+            },
+            onClose: () => setOpen(false),
+            onReload: () => {},
+          })
+        : null;
+
+      return jsxs('div', { className: 'inj-field full', children: [
+        jsx('label', { className: 'inj-label', children: t('task.model') }),
+        gear
+          ? jsxs(react.Fragment, { children: [
+              jsxs('div', { className: 'inj-modelRow', children: [
+                jsxs('button', {
+                  type: 'button',
+                  className: 'inj-modelPick' + (hasSelection ? '' : ' empty'),
+                  onClick: () => { setTab(null); setOpen(true); },
+                  'aria-haspopup': 'dialog',
+                  'aria-expanded': open,
+                  children: [
+                    jsx('span', { className: 'inj-modelName', children: hasSelection ? described.label : t('task.model.default') }),
+                    described.effort ? jsx('span', { className: 'inj-pill', children: described.effort }) : null,
+                    jsx('span', { className: 'inj-modelChev', children: '▾' }),
+                  ],
+                }),
+                hasSelection
+                  ? jsx('button', { type: 'button', className: 'inj-linkBtn', onClick: () => onChange({ provider: '', model: '', reasoningEffort: '' }), children: t('task.model.clear') })
+                  : null,
+              ] }),
+              jsx('div', { className: 'inj-hint', children: t('task.model.hint') }),
+            ] })
+          : fallback,
+        !gearTried
+          ? jsx('div', { className: 'inj-hint', children: t('task.model.loading') })
+          : (gearTried && !gear ? jsx('div', { className: 'inj-hint', children: t('task.model.fallback') }) : null),
+        picker,
+      ] });
+    }
+
     /* ── 规则表单 ──────────────────────────────────────────────────── */
 
-    function TaskForm({ initial, templates, catalog, t, onSave, onCancel, onTemplatesChanged }) {
+    function TaskForm({ initial, templates, catalog, t, gearT, onSave, onCancel, onTemplatesChanged }) {
       const msg = makeMessage(t);
       const [name, setName] = react.useState(initial?.name ?? '');
       const [provider, setProvider] = react.useState(initial?.provider ?? '');
       const [model, setModel] = react.useState(initial?.model ?? '');
+      const [reasoningEffort, setReasoningEffort] = react.useState(initial?.reasoningEffort ?? '');
       const [systemPrompt, setSystemPrompt] = react.useState(initial?.systemPrompt ?? '');
       const [enabled, setEnabled] = react.useState(initial?.enabled ?? true);
       const [templateId, setTemplateId] = react.useState('');
@@ -479,8 +639,6 @@ window.__ModuleLoader__.load({
       const [managerMsg, setManagerMsg] = react.useState(null);
       const [saving, setSaving] = react.useState(false);
 
-      const groups = catalog?.groups ?? [];
-      const models = groups.find((g) => g.id === provider)?.models ?? [];
       const isEdit = initial?.id !== undefined;
 
       const chooseTemplate = (id) => {
@@ -542,6 +700,7 @@ window.__ModuleLoader__.load({
             name: name.trim(),
             provider: provider || undefined,
             model: model || undefined,
+            reasoningEffort: reasoningEffort || undefined,
             systemPrompt,
             enabled,
           });
@@ -569,32 +728,19 @@ window.__ModuleLoader__.load({
             }),
             jsx('div', { className: 'inj-hint', children: t('task.name.hint') }),
           ] }),
-          jsxs('div', { className: 'inj-field', children: [
-            jsx('label', { className: 'inj-label', children: t('provider') }),
-            jsx('select', {
-              className: 'inj-select',
-              value: provider,
-              onChange: (e) => { setProvider(e.target.value); setModel(''); },
-              children: [
-                jsx('option', { value: '', children: t('task.model.default') }),
-                groups.map((g) => jsx('option', { key: g.id, value: g.id, children: g.name || g.id })),
-              ],
-            }),
-          ] }),
-          jsxs('div', { className: 'inj-field', children: [
-            jsx('label', { className: 'inj-label', children: t('model') }),
-            jsx('select', {
-              className: 'inj-select',
-              value: model,
-              onChange: (e) => setModel(e.target.value),
-              disabled: !provider,
-              children: [
-                jsx('option', { value: '', children: '—' }),
-                models.map((m) => jsx('option', { key: m.id, value: m.id, children: m.name || m.id })),
-              ],
-            }),
-          ] }),
-          jsx('div', { className: 'inj-field full', children: jsx('div', { className: 'inj-hint', children: t('task.model.hint') }) }),
+          jsx(GearModelField, {
+            provider,
+            model,
+            reasoningEffort,
+            catalog,
+            t,
+            gearT,
+            onChange: (next) => {
+              setProvider(next.provider ?? '');
+              setModel(next.model ?? '');
+              setReasoningEffort(next.reasoningEffort ?? '');
+            },
+          }),
           jsxs('div', { className: 'inj-field full', children: [
             jsx('label', { className: 'inj-label', children: t('task.prompt') }),
             jsx('textarea', {
@@ -685,7 +831,7 @@ window.__ModuleLoader__.load({
 
     const RUNS_COLLAPSED_COUNT = 5;
 
-    function InjectPanel({ sessionId, t }) {
+    function InjectPanel({ sessionId, t, gearT }) {
       const msg = makeMessage(t);
       const [tasks, setTasks] = react.useState([]);
       const [templates, setTemplates] = react.useState([]);
@@ -761,6 +907,7 @@ window.__ModuleLoader__.load({
                 name: form.name,
                 provider: form.provider,
                 model: form.model,
+                reasoningEffort: form.reasoningEffort,
                 systemPrompt: form.systemPrompt,
                 enabled: form.enabled,
               },
@@ -772,6 +919,7 @@ window.__ModuleLoader__.load({
               name: form.name,
               provider: form.provider,
               model: form.model,
+              reasoningEffort: form.reasoningEffort,
               systemPrompt: form.systemPrompt,
               enabled: form.enabled,
             });
@@ -902,6 +1050,8 @@ window.__ModuleLoader__.load({
                 jsx('span', { children: t('task.trigger.badge') }),
                 jsx('span', { className: 'dot', children: '·' }),
                 jsx('span', { children: modelText(task) }),
+                task.reasoningEffort ? jsx('span', { className: 'dot', children: '·' }) : null,
+                task.reasoningEffort ? jsx('span', { children: 'effort ' + task.reasoningEffort }) : null,
                 jsx('span', { className: 'dot', children: '·' }),
                 jsx('span', {
                   title: task.lastRunAt ? formatRunTime(task.lastRunAt) : undefined,
@@ -1076,6 +1226,7 @@ window.__ModuleLoader__.load({
               templates,
               catalog,
               t,
+              gearT,
               onSave: saveTask,
               onCancel: () => setEditing(null),
               onTemplatesChanged: () => void refresh(),
@@ -1112,6 +1263,8 @@ window.__ModuleLoader__.load({
 
     function apply(ctx) {
       const t = ctx.locale.bind(NS);
+      // gear 的文案命名空间；插件未安装/未注册时 bind 仍返回可调用函数（显示 key），不影响 fallback。
+      const gearT = ctx.locale.bind('gearGrid');
       ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'schedule-task-tab: dictionaries');
       ctx.effect(() => ctx.slots.inject('conversation.view', () => ctx.slots.register({
         name: 'conversation.view',
@@ -1123,7 +1276,7 @@ window.__ModuleLoader__.load({
           ensureStyles();
           return { sessionId };
         },
-      }, (props) => jsx(InjectPanel, { sessionId: props.sessionId, t: props.t }))), 'schedule-task-tab: view');
+      }, (props) => jsx(InjectPanel, { sessionId: props.sessionId, t: props.t, gearT }))), 'schedule-task-tab: view');
     }
 
     return { inject: INJECT, apply };

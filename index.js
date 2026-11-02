@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.2.0';
+export const version = '3.3.0';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
@@ -286,6 +286,7 @@ export function apply(ctx) {
       trigger: TRIGGER_TURN_END,
       provider: input.provider ? String(input.provider) : undefined,
       model: input.model ? String(input.model) : undefined,
+      reasoningEffort: input.reasoningEffort ? String(input.reasoningEffort) : undefined,
       systemPrompt: String(input.systemPrompt ?? ''),
       templateId: input.templateId ? String(input.templateId) : undefined,
       createdAt: nowIso(),
@@ -303,6 +304,7 @@ export function apply(ctx) {
     if (typeof patch.name === 'string') task.name = patch.name.trim().slice(0, 120) || task.name;
     if (patch.provider !== undefined) task.provider = patch.provider ? String(patch.provider) : undefined;
     if (patch.model !== undefined) task.model = patch.model ? String(patch.model) : undefined;
+    if (patch.reasoningEffort !== undefined) task.reasoningEffort = patch.reasoningEffort ? String(patch.reasoningEffort) : undefined;
     if (patch.systemPrompt !== undefined) task.systemPrompt = String(patch.systemPrompt);
     if (patch.enabled !== undefined) task.enabled = !!patch.enabled;
     if (patch.templateId !== undefined) task.templateId = patch.templateId ? String(patch.templateId) : undefined;
@@ -531,7 +533,13 @@ export function apply(ctx) {
         prompt: [{ type: 'text', text: prompt }],
         parent: resolved.agent,
         signal: new AbortController().signal,
-        ...(task.provider && task.model ? { agentOptions: { provider: task.provider, model: task.model } } : {}),
+        ...(task.provider && task.model
+          ? { agentOptions: {
+              provider: task.provider,
+              model: task.model,
+              ...(task.reasoningEffort ? { reasoningEffort: task.reasoningEffort } : {}),
+            } }
+          : {}),
         toolFilter: { allow: SUBAGENT_TOOLS },
       });
       const subagentId = started.id; // 子代理会话：UI 可跳回去看真实过程

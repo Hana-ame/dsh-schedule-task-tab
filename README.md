@@ -20,6 +20,8 @@ v3.1 面板人性化改版：头部一句话说明、规则卡带状态与相对
 
 会话视图新增「审阅」tab：顶部一句人话说明当前行为；审阅规则 CRUD（名称、子代理模型、审阅指令、启用开关，模板可一键填入/管理）；最近审阅记录按状态徽标分组展示（已提醒/无需提醒/失败），带相对时间、结束原因与子代理会话 id（点击复制）；支持「立即审阅」、仅本会话/全部会话切换、30 秒自动刷新指示。
 
+子代理模型选择器复用了 `dsh-gear-grid-model`（v1.1 起导出的 `GearGridPicker`）：触发按钮显示「provider / model + 强度」，弹窗里「常用」显示手动 star 的模型、具体 provider tab 显示该 provider 全部模型，选中即带回 `provider`/`model`/`reasoningEffort`（强度随规则存下并透传到子代理 `agentOptions`）。该依赖是**可选**的：用 `require.async('dsh-gear-grid-model')` 懒加载，插件缺失/版本旧/加载失败时自动回退到普通「服务商 + 模型」两个下拉框。
+
 完整指令支持占位符：`{sessionId}` `{taskName}` `{turn}` `{reason}`；留空则使用内置默认审阅指令。
 
 ## 存储 / RPC
