@@ -6,7 +6,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "test:live": "node test/live-e2e.mjs"
   },
   "exports": {
     ".": "./index.js",
