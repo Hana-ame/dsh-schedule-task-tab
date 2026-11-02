@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Scheduled Session Injection",
-    "description": "Create scheduled injection tasks that wake a subagent to read the main session and act per session."
+    "title": "Session Review Injection",
+    "description": "After each conversation turn ends, a subagent reviews the conversation and decides whether to inject a follow-up into the main session; includes a shared template library, per-session memo, and review history."
   }
 }

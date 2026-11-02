@@ -16,41 +16,46 @@ window.__ModuleLoader__.load({
     const ROUTE = '/api/inject-manager';
 
     const zh = {
-      'view.label': '注入',
-      'section.tasks': '注入任务',
+      'view.label': '审阅',
+      'section.tasks': '审阅规则',
       'section.templates': '模板库',
       'section.memo': '本会话 Memo',
-      'section.runs': '最近注入',
-      'new.task': '新建任务',
+      'section.runs': '最近审阅',
+      'new.task': '新建规则',
       'new.template': '新建模板',
-      'empty.tasks': '还没有注入任务',
+      'empty.tasks': '还没有审阅规则',
       'empty.templates': '还没有模板',
-      'empty.runs': '还没有注入记录',
-      'task.name': '任务名',
-      'task.every': '间隔（分钟）',
+      'empty.runs': '还没有审阅记录',
+      'task.name': '规则名',
       'task.model': '模型',
       'task.model.hint': '不选则用会话默认模型',
-      'task.prompt': 'System Prompt（目标任务）',
-      'task.prompt.hint': '完整自定义子代理指令（步骤/格式全由你定）；可用占位符 {sessionId} {taskName}',
-      'task.enabled': '启用定时触发',
+      'task.prompt': '审阅指令（子代理 System Prompt）',
+      'task.prompt.hint': '完整自定义审阅子代理指令（步骤/格式全由你定）；可用占位符 {sessionId} {taskName} {turn} {reason}',
+      'task.enabled': '每轮对话结束后自动审阅',
       'task.useMemo': '读取 Memo',
       'task.template': '从模板填入',
       'task.template.pick': '— 选择模板即填入 —',
+      'task.trigger': '每次对话结束',
+      'trigger.hint': '主会话每一轮对话结束后，自动启动子代理审阅对话内容，再判断是否注入主会话。',
       'save': '保存',
       'cancel': '取消',
       'edit': '编辑',
       'delete': '删除',
       'confirm.delete': '确认删除？',
-      'run.now': '立即注入',
-      'on': '运行中',
+      'run.now': '立即审阅',
+      'on': '已启用',
       'off': '已停用',
-      'next': '下次',
+      'last': '上次',
+      'never': '从未审阅',
+      'run.turn': '轮次',
+      'run.manual': '手动',
+      'run.reason': '结束原因',
       'memo.save': '保存 Memo',
       'memo.clear': '清空',
       'memo.empty': '（空）memo 是子代理与本面板共享的持久笔记，子代理可通过工具读写',
       'template.name': '名称',
       'template.desc': '描述',
-      'template.body': '完整子代理指令模板（跨会话通用，支持 {sessionId} {taskName}）',
+      'template.body': '完整审阅子代理指令模板（跨会话通用，支持 {sessionId} {taskName} {turn} {reason}）',
       'provider': 'Provider',
       'loading': '加载中…',
       'refresh': '刷新',
@@ -60,55 +65,60 @@ window.__ModuleLoader__.load({
       'no.model.catalog': '模型目录不可用',
       'scope.session': '本会话',
       'scope.all': '全部会话',
-      'subagent.hint': '子代理会话不参与会话注入（注入只作用于主 agent 会话）',
+      'subagent.hint': '子代理会话不参与审阅注入（注入只作用于主 agent 会话）',
       'runs.more': '展开全部',
       'runs.less': '收起',
       'subagent.session': '子代理会话',
       'saved': '已保存',
       'created': '已创建',
       'updated': '已更新',
-      'triggered': '已触发一次注入',
+      'triggered': '已手动触发一次审阅',
       'memo.saved': 'Memo 已保存',
       'memo.cleared': 'Memo 已清空',
-      'task.name.placeholder': '例如：每日进展注入',
+      'task.name.placeholder': '例如：每轮结束审阅待办',
       'default.model': '默认模型',
     };
     const en = {
-      'view.label': 'Inject',
-      'section.tasks': 'Injections',
+      'view.label': 'Review',
+      'section.tasks': 'Review rules',
       'section.templates': 'Templates',
       'section.memo': 'Session Memo',
-      'section.runs': 'Recent runs',
-      'new.task': 'New task',
+      'section.runs': 'Recent reviews',
+      'new.task': 'New rule',
       'new.template': 'New template',
-      'empty.tasks': 'No injections yet',
+      'empty.tasks': 'No review rules yet',
       'empty.templates': 'No templates yet',
-      'empty.runs': 'No runs yet',
+      'empty.runs': 'No reviews yet',
       'task.name': 'Name',
-      'task.every': 'Interval (minutes)',
       'task.model': 'Model',
       'task.model.hint': 'Leave empty to use the session default model',
-      'task.prompt': 'System prompt (goal)',
-      'task.prompt.hint': 'Full custom subagent instruction (steps/format fully yours); placeholders {sessionId} {taskName}',
-      'task.enabled': 'Schedule enabled',
+      'task.prompt': 'Review instruction (subagent system prompt)',
+      'task.prompt.hint': 'Full custom review subagent instruction (steps/format fully yours); placeholders {sessionId} {taskName} {turn} {reason}',
+      'task.enabled': 'Review after every turn',
       'task.useMemo': 'Read memo',
       'task.template': 'Fill from template',
       'task.template.pick': '— pick a template to fill —',
+      'task.trigger': 'on every turn end',
+      'trigger.hint': 'After each turn of the main session ends, a subagent reviews the conversation and decides whether to inject a follow-up.',
       'save': 'Save',
       'cancel': 'Cancel',
       'edit': 'Edit',
       'delete': 'Delete',
       'confirm.delete': 'Confirm delete?',
-      'run.now': 'Run now',
+      'run.now': 'Review now',
       'on': 'On',
       'off': 'Off',
-      'next': 'Next',
+      'last': 'Last',
+      'never': 'never reviewed',
+      'run.turn': 'turn',
+      'run.manual': 'manual',
+      'run.reason': 'ended',
       'memo.save': 'Save memo',
       'memo.clear': 'Clear',
-      'memo.empty': '(empty) the memo is a persistent note shared with injection subagents',
+      'memo.empty': '(empty) the memo is a persistent note shared with review subagents',
       'template.name': 'Name',
       'template.desc': 'Description',
-      'template.body': 'Full subagent instruction template (shared across sessions; supports {sessionId} {taskName})',
+      'template.body': 'Full review subagent instruction template (shared across sessions; supports {sessionId} {taskName} {turn} {reason})',
       'provider': 'Provider',
       'loading': 'Loading…',
       'refresh': 'Refresh',
@@ -118,17 +128,17 @@ window.__ModuleLoader__.load({
       'no.model.catalog': 'Model catalog unavailable',
       'scope.session': 'This session',
       'scope.all': 'All sessions',
-      'subagent.hint': 'Subagent sessions never participate in injection (injection only targets root agent sessions)',
+      'subagent.hint': 'Subagent sessions never participate in review injection (injection only targets root agent sessions)',
       'runs.more': 'Show all',
       'runs.less': 'Show less',
       'subagent.session': 'subagent session',
       'saved': 'Saved',
       'created': 'Created',
       'updated': 'Updated',
-      'triggered': 'Triggered one injection',
+      'triggered': 'Ran one review',
       'memo.saved': 'Memo saved',
       'memo.cleared': 'Memo cleared',
-      'task.name.placeholder': 'e.g. Daily progress injection',
+      'task.name.placeholder': 'e.g. Review every turn',
       'default.model': 'default model',
     };
 
@@ -209,6 +219,7 @@ window.__ModuleLoader__.load({
       '.inj-run:last-child{border-bottom:0}' +
       '.inj-runDot{flex:none;margin-top:5px;width:7px;height:7px;border-radius:50%}' +
       '.inj-runDot.ok{background:#16a34a}' +
+      '.inj-runDot.skip{background:rgba(127,127,127,.55)}' +
       '.inj-runDot.failed{background:#dc2626}' +
       '.inj-runBody{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}' +
       '.inj-runHead{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap}' +
@@ -251,13 +262,6 @@ window.__ModuleLoader__.load({
       return payload.value;
     }
 
-    const formatNext = (iso) => {
-      if (!iso) return '—';
-      const at = new Date(iso);
-      if (Number.isNaN(at.getTime())) return iso;
-      return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at);
-    };
-
     const formatRunTime = (iso) => {
       const at = new Date(iso);
       if (Number.isNaN(at.getTime())) return iso;
@@ -281,7 +285,6 @@ window.__ModuleLoader__.load({
 
     function TaskForm({ initial, templates, catalog, t, onSave, onCancel, onTemplatesChanged }) {
       const [name, setName] = react.useState(initial?.name ?? '');
-      const [everyMinutes, setEveryMinutes] = react.useState(String(Math.round((initial?.everySeconds ?? 600) / 60)));
       const [provider, setProvider] = react.useState(initial?.provider ?? '');
       const [model, setModel] = react.useState(initial?.model ?? '');
       const [systemPrompt, setSystemPrompt] = react.useState(initial?.systemPrompt ?? '');
@@ -341,7 +344,6 @@ window.__ModuleLoader__.load({
       const submit = () => {
         onSave({
           name: name.trim(),
-          everyMinutes: Number(everyMinutes) || 10,
           provider: provider || undefined,
           model: model || undefined,
           systemPrompt,
@@ -352,13 +354,9 @@ window.__ModuleLoader__.load({
 
       return jsxs('div', { className: 'inj-form', children: [
         jsxs('div', { className: 'inj-formGrid', children: [
-          jsxs('div', { className: 'inj-field', children: [
+          jsxs('div', { className: 'inj-field full', children: [
             jsx('label', { className: 'inj-label', children: t('task.name') }),
             jsx('input', { className: 'inj-input', value: name, onChange: (e) => setName(e.target.value), placeholder: t('task.name.placeholder') }),
-          ] }),
-          jsxs('div', { className: 'inj-field', children: [
-            jsx('label', { className: 'inj-label', children: t('task.every') }),
-            jsx('input', { className: 'inj-input', type: 'number', min: 1, max: 1440, value: everyMinutes, onChange: (e) => setEveryMinutes(e.target.value) }),
           ] }),
           jsxs('div', { className: 'inj-field', children: [
             jsx('label', { className: 'inj-label', children: t('provider') }),
@@ -397,6 +395,7 @@ window.__ModuleLoader__.load({
             jsx('button', { className: 'inj-btn primary', onClick: submit, children: t('save') }),
           ] }),
         ] }),
+        jsx('div', { className: 'inj-hint', children: t('trigger.hint') }),
         /* 模板：选择即填入 + 管理（直接展开） */
         jsxs('div', { className: 'inj-tplMgr', children: [
           jsxs('div', { style: { display: 'flex', alignItems: 'center', gap: 8 }, children: [
@@ -526,7 +525,6 @@ window.__ModuleLoader__.load({
               id: editing.task.id,
               patch: {
                 name: form.name,
-                everySeconds: Math.max(60, Math.round(Number(form.everyMinutes) * 60)),
                 provider: form.provider,
                 model: form.model,
                 systemPrompt: form.systemPrompt,
@@ -539,7 +537,6 @@ window.__ModuleLoader__.load({
             await hostCall('tasks/create', {
               sessionId,
               name: form.name,
-              everySeconds: Math.max(60, Math.round(Number(form.everyMinutes) * 60)),
               provider: form.provider,
               model: form.model,
               systemPrompt: form.systemPrompt,
@@ -640,10 +637,10 @@ window.__ModuleLoader__.load({
             ] }),
           ] }),
           jsxs('div', { className: 'inj-chips', children: [
-            jsx('span', { className: 'inj-chip', children: '每 ' + Math.round(task.everySeconds / 60) + ' 分钟' }),
+            jsx('span', { className: 'inj-chip', children: t('task.trigger') }),
             jsx('span', { className: 'inj-chip model', children: modelText(task) }),
             jsx('span', { className: 'inj-chip ' + (task.useMemo === false ? 'nomemo' : 'memo'), children: task.useMemo === false ? 'no memo' : 'memo' }),
-            jsx('span', { className: 'inj-chip', children: t('next') + ' ' + formatNext(task.nextRunAt) }),
+            jsx('span', { className: 'inj-chip', children: t('last') + ' ' + (task.lastRunAt ? formatRunTime(task.lastRunAt) : t('never')) }),
           ] }),
         ] });
       };
@@ -721,21 +718,29 @@ window.__ModuleLoader__.load({
           children: runs.length === 0
             ? jsx('div', { className: 'inj-empty', children: t('empty.runs') })
             : jsxs(react.Fragment, { children: [
-              shownRuns.map((run) => (
-                jsxs('div', { key: run.id, className: 'inj-run', children: [
-                  jsx('span', { className: 'inj-runDot ' + (run.status === 'ok' ? 'ok' : 'failed') }),
+              shownRuns.map((run) => {
+                const ok = run.status === 'ok' && run.injected === true;
+                const failed = run.status !== 'ok';
+                const dotClass = failed ? 'failed' : (ok ? 'ok' : 'skip');
+                const brief = failed ? run.error : (run.injected ? run.injectedBrief : t('status.skip'));
+                const triggerText = run.manual
+                  ? t('run.manual')
+                  : (t('run.turn') + ' ' + (run.turn ?? '?') + (run.reason ? ' · ' + run.reason : ''));
+                return jsxs('div', { key: run.id, className: 'inj-run', children: [
+                  jsx('span', { className: 'inj-runDot ' + dotClass }),
                   jsxs('div', { className: 'inj-runBody', children: [
                     jsxs('div', { className: 'inj-runHead', children: [
                       jsx('span', { className: 'inj-runName', children: run.taskName }),
                       jsx('span', { className: 'inj-runTime', children: formatRunTime(run.startedAt) }),
+                      jsx('span', { className: 'inj-runTime', children: triggerText }),
                     ] }),
-                    jsx('div', { className: 'inj-runBrief', children: run.status === 'ok' ? run.injectedBrief : run.error }),
+                    jsx('div', { className: 'inj-runBrief', children: brief }),
                     run.subagentSessionId
                       ? jsx('div', { className: 'inj-runSub', children: t('subagent.session') + ': ' + run.subagentSessionId })
                       : null,
                   ] }),
-                ] })
-              )),
+                ] });
+              }),
               runs.length > RUNS_COLLAPSED_COUNT
                 ? jsx('button', { className: 'inj-btn small', style: { alignSelf: 'center' }, onClick: () => setRunsAll(!runsAll), children: runsAll ? t('runs.less') : t('runs.more') + ' (' + runs.length + ')' })
                 : null,

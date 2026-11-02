@@ -1,9 +1,13 @@
 {
   "name": "dsh-schedule-task-tab",
-  "version": "1.0.0",
-  "description": "会话注入管理（inject-manager）：人工创建定时注入任务，到点触发子代理读取主会话上下文与 per-session memo（工具拉取），分析后将回应注入主会话唤醒主 agent；含全局模板库与 memo 编辑。",
+  "version": "2.0.0",
+  "description": "会话审阅注入（inject-manager）：每次主会话一轮对话结束后触发子代理，读取对话内容与 per-session memo（工具拉取），审阅后判断是否注入主会话唤醒主 agent；含全局模板库、memo 编辑与审阅记录。不再使用定时器（与 schedule 功能重复，已移除）。",
+  "author": "nanaka",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

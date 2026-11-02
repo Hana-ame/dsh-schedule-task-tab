@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "定时会话注入",
-    "description": "人工创建定时注入任务，到点触发子代理读取主会话上下文，并按 per-session 设定执行。"
+    "title": "会话审阅注入",
+    "description": "每次对话结束后启动子代理审阅对话内容，判断是否需要注入主会话以唤醒主 agent；含全局模板库、per-session memo 与审阅记录。"
   }
 }
