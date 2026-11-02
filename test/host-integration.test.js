@@ -52,7 +52,7 @@ function waitFor(predicate, timeoutMs = 2000) {
  * Build a fake Cordis context plus fake host services.
  * `subagentScript` is invoked with the registered tools when subagents.start runs.
  */
-function createHarness({ baseDir, tasks = {}, subagentScript } = {}) {
+function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spawn'] } = {}) {
   const stateFile = seedState(baseDir, tasks);
   const toolDefs = new Map();
   const listeners = new Map();
@@ -95,9 +95,9 @@ function createHarness({ baseDir, tasks = {}, subagentScript } = {}) {
   };
 
   const subagents = {
-    async list() { return ['default']; },
-    async start(_provider, options) {
-      startCalls.push(options);
+    async list() { return providers; },
+    async start(provider, options) {
+      startCalls.push({ provider, options });
       await subagentScript({ tools: toolDefs, options });
       return { id: `subagent-${startCalls.length}`, result: Promise.resolve({ status: 'ok' }) };
     },
@@ -335,4 +335,31 @@ test('RPC dispatch serves tasks/list and tasks/runNow', async () => {
   const state = readState(harness.stateFile);
   assert.equal(state.runs[0].manual, true);
   assert.equal('memos' in state, false, 'per-session memo storage must be dropped after migration');
+});
+test('review always starts on the spawn provider, never providers[0]', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask() },
+    providers: ['fork', 'spawn'],
+    subagentScript: async () => {},
+  });
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+  assert.equal(harness.startCalls.length, 1, 'one review subagent must start');
+  assert.equal(harness.startCalls[0].provider, 'spawn', 'must not pick the first registered provider');
+});
+
+test('missing spawn provider fails the review loudly instead of falling back', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask() },
+    providers: ['fork'],
+    subagentScript: async () => {},
+  });
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+  const run = readState(harness.stateFile).runs[0];
+  assert.equal(run.status, 'failed');
+  assert.match(run.error, /"spawn" 未注册/);
+  assert.equal(harness.startCalls.length, 0, 'no subagent may start without spawn');
 });

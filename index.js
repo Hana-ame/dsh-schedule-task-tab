@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.1.0';
+export const version = '3.1.1';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
@@ -485,9 +485,21 @@ export function apply(ctx) {
       const prompt = buildReviewPrompt(task, trigger);
 
       // 4. 启动子代理（只给读上下文与提交注入两个工具）。
+      // 固定用 spawn（fresh 上下文）：fork 会把主会话全量日志 seed 进子会话，成本和行为都会漂移；
+      // 也不能用 providers[0]——provider 注册顺序可能变化。缺 spawn 时本轮判失败，不静默换 provider。
       const providers = (await subagents.list()) ?? [];
-      const provider = providers[0] ?? 'default';
-      const started = await subagents.start(provider, {
+      if (!providers.includes('spawn')) {
+        recordRun(task, {
+          startedAt,
+          turn: trigger.turn,
+          reason: trigger.reason,
+          manual: trigger.manual,
+          status: 'failed',
+          error: `子代理 provider "spawn" 未注册（当前: ${providers.join(', ') || 'none'}）`,
+        });
+        return { status: 'failed', error: 'provider-unavailable' };
+      }
+      const started = await subagents.start('spawn', {
         label: task.name,
         prompt: [{ type: 'text', text: prompt }],
         parent: resolved.agent,
