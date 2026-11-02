@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Session Review Injection",
-    "description": "After each conversation turn ends, a subagent reviews the conversation and decides whether to inject a follow-up into the main session; includes a shared template library, per-session memo, and review history."
+    "description": "After each conversation turn ends, a subagent reviews the conversation and decides whether to inject a follow-up into the main session; includes a shared template library and review history."
   }
 }
