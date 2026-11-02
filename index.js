@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.1.1';
+export const version = '3.2.0';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
@@ -228,6 +228,7 @@ export function apply(ctx) {
   let sessionController;
   let llm;
   let tools;
+  let agents; // 用于给审阅子代理的 agent scope 补工具白名单 guard
 
   /** 进行中的审阅：按目标会话 id 串行（同一会话同时只跑一个审阅）。 */
   const activeRuns = new Map();
@@ -451,6 +452,31 @@ export function apply(ctx) {
   }
 
   /**
+   * 审阅子代理只允许调用 SUBAGENT_TOOLS。toolFilter 只能遮住 global 工具，
+   * agent preset 带下来的 scoped 工具（list_agents / subagent / ...）不受它约束；
+   * 这里在 child agent 的 scope 上补一道 guard（tools.guard 注册在 agent.ctx 时
+   * 只作用于该 agent），越权调用会被拒绝并给出原因。
+   *
+   * @param childId - 刚启动的审阅子代理 session id
+   * @returns 解除 guard 的 disposer；拿不到 child/guard 时返回空 disposer
+   */
+  function guardReviewChild(childId) {
+    try {
+      const child = agents?.get?.(String(childId ?? ''));
+      const childTools = child?.ctx?.get?.('tools') ?? child?.ctx?.tools;
+      if (!childTools || typeof childTools.guard !== 'function') return () => {};
+      return childTools.guard((exec) => {
+        const called = String(exec?.name ?? 'unknown');
+        return SUBAGENT_TOOLS.includes(called)
+          ? undefined
+          : `审阅子代理只允许调用 ${SUBAGENT_TOOLS.join(' / ')}，禁止调用 ${called}`;
+      });
+    } catch {
+      return () => {};
+    }
+  }
+
+  /**
    * 触发一次审阅。trigger: { turn?, reason?, manual? }
    * @returns {Promise<{status:string, injected?:boolean, error?:string, reason?:string}>}
    */
@@ -463,6 +489,7 @@ export function apply(ctx) {
     }
     const run = { sessionId, taskId: task.id, pendingInjection: undefined, turn: trigger.turn, reason: trigger.reason };
     activeRuns.set(sessionId, run);
+    let disposeChildGuard = () => {};
     try {
       // 1. 拿到主会话的 Agent 作为子代理父级。
       const resolved = await sessionController.resolveAgent(sessionId);
@@ -508,6 +535,8 @@ export function apply(ctx) {
         toolFilter: { allow: SUBAGENT_TOOLS },
       });
       const subagentId = started.id; // 子代理会话：UI 可跳回去看真实过程
+      // toolFilter 之外再补一道 child-scope guard（挡住 preset 带下来的 scoped 工具）。
+      disposeChildGuard = guardReviewChild(subagentId);
 
       // 5. 等子代理结束：注入内容只来自 inject_deliver 提交，而不是最后一条回复。
       await started.result;
@@ -562,6 +591,7 @@ export function apply(ctx) {
       });
       return { status: 'failed', error: messageOf(error) };
     } finally {
+      try { disposeChildGuard(); } catch { /* child 已回收时 disposer 可能已释放 */ }
       if (activeRuns.get(sessionId) === run) activeRuns.delete(sessionId);
       persist();
     }
@@ -776,8 +806,14 @@ export function apply(ctx) {
 
   if (typeof ctx.inject === 'function') {
     ctx.inject(['webServer', 'tools', 'subagents', 'sessionController', 'llm'], install);
+    // 可选服务：只有拿到 agents 才能在 child agent scope 上装 guard；缺失时审阅照旧，仅少这道保险。
+    ctx.inject(['agents'], (acx) => {
+      agents = acx.agents;
+      console.log('[inject-manager] review child tool guard ready (agents=true)');
+    });
   } else {
     install(ctx);
+    agents = ctx.agents;
   }
 
   ctx.effect(() => () => { persist(); }, 'inject-manager: persist-on-close');

@@ -94,12 +94,31 @@ function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spaw
     },
   };
 
+  const childGuards = [];
+  const childAgents = new Map();
+  const agents = {
+    get(id) { return childAgents.get(String(id)); },
+  };
+
   const subagents = {
     async list() { return providers; },
     async start(provider, options) {
-      startCalls.push({ provider, options });
+      const id = `subagent-${startCalls.length + 1}`;
+      startCalls.push({ provider, options, id });
+      childAgents.set(id, {
+        id,
+        ctx: {
+          tools: {
+            guard(fn) {
+              const record = { fn, active: true };
+              childGuards.push(record);
+              return () => { record.active = false; };
+            },
+          },
+        },
+      });
       await subagentScript({ tools: toolDefs, options });
-      return { id: `subagent-${startCalls.length}`, result: Promise.resolve({ status: 'ok' }) };
+      return { id, result: Promise.resolve({ status: 'ok' }) };
     },
   };
 
@@ -111,6 +130,7 @@ function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spaw
     subagents,
     sessionController,
     llm,
+    agents,
     get(name) {
       if (name === 'hmr') return { baseDir };
       return undefined;
@@ -154,6 +174,7 @@ function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spaw
     listeners,
     promptCalls,
     startCalls,
+    childGuards,
     getRoute: () => route,
     stateFile,
     rootSession,
@@ -362,4 +383,21 @@ test('missing spawn provider fails the review loudly instead of falling back', a
   assert.equal(run.status, 'failed');
   assert.match(run.error, /"spawn" 未注册/);
   assert.equal(harness.startCalls.length, 0, 'no subagent may start without spawn');
+});
+
+test('review subagent gets a child-scope guard for the two injection tools only', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask() },
+    subagentScript: async () => {},
+  });
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+
+  assert.equal(harness.childGuards.length, 1, 'one guard must be armed on the review child');
+  const guard = harness.childGuards[0];
+  assert.equal(guard.fn({ name: 'inject_context_read' }), undefined);
+  assert.equal(guard.fn({ name: 'inject_deliver' }), undefined);
+  assert.match(String(guard.fn({ name: 'list_agents' })), /只允许调用/);
+  assert.equal(guard.active, false, 'guard must be released when the review run settles');
 });

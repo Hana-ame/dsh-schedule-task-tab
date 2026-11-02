@@ -9,7 +9,7 @@ v3.1 面板人性化改版：头部一句话说明、规则卡带状态与相对
 ## 行为
 
 1. Host 半监听 host 平面 `session/event`；主会话（非子代理会话）出现真实 `turn/end` 时，为该会话每条**已启用**的审阅规则排一次审阅。
-2. 审阅子代理固定用 `spawn` provider（fresh 上下文，不会把主会话历史 seed 进子会话；缺该 provider 时本轮直接判失败并记录原因，不静默换 provider），只拿到两个工具：
+2. 审阅子代理固定用 `spawn` provider（fresh 上下文，不会把主会话历史 seed 进子会话；缺该 provider 时本轮直接判失败并记录原因，不静默换 provider），只允许两个工具（toolFilter 之外还在子代理 agent scope 上补一道 guard，挡住 preset 带下来的 `list_agents`/`subagent` 等 scoped 工具）：
    - `inject_context_read` 读取主会话最近消息（审阅对话内容）；
    - `inject_deliver` 提交要注入的内容。
 3. 只有调用了 `inject_deliver` 才注入：内容加 `[注入·规则名]` 前缀，经 `sessionController.prompt` 作为一条消息注入并唤醒主 agent；不调用则“本轮不注入”。
