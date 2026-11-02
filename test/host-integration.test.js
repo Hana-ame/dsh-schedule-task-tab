@@ -176,7 +176,6 @@ function baseTask(overrides = {}) {
     everySeconds: 600,
     nextRunAt: '2026-10-14T15:47:01.006Z',
     systemPrompt: '调用 inject_context_read(sessionId="{sessionId}")，不要注入。',
-    useMemo: false,
     ...overrides,
   };
 }
@@ -186,8 +185,6 @@ test('boot wires tools, HTTP route and the session/event listener', () => {
   assert.deepEqual([...harness.tools.keys()].sort(), [
     'inject_context_read',
     'inject_deliver',
-    'inject_memo_read',
-    'inject_memo_write',
   ]);
   assert.equal(harness.getRoute()?.path, '/api/inject-manager');
   assert.equal(typeof harness.listeners.get('session/event'), 'function');
@@ -330,10 +327,12 @@ test('RPC dispatch serves tasks/list and tasks/runNow', async () => {
   assert.equal(listed.body.value.length, 1);
   assert.equal(listed.body.value[0].trigger, 'turn-end');
   assert.equal('everySeconds' in listed.body.value[0], false, 'timer field must be migrated away');
+  assert.equal('useMemo' in listed.body.value[0], false, 'memo switch must be migrated away');
 
   const run = await call({ method: 'tasks/runNow', args: { id: 'task-1' } });
   assert.equal(run.body.ok, true);
   assert.equal(run.body.value.status, 'ok');
   const state = readState(harness.stateFile);
   assert.equal(state.runs[0].manual, true);
+  assert.equal('memos' in state, false, 'per-session memo storage must be dropped after migration');
 });

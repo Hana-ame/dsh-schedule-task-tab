@@ -4,7 +4,7 @@
  * 「会话审阅注入」：每个会话可以配置若干审阅规则。主会话每一轮对话结束
  * （session 事件 `turn/end`，且不是子代理会话、不是注入消息自己引发的那一轮）后，
  * 触发一个专用审阅子代理（subagents.start，可指定 provider/model），子代理通过
- * 专用工具拉取主会话上下文与本会话 memo（并可写 memo），审阅刚才的对话内容，
+ * 专用工具拉取主会话上下文，审阅刚才的对话内容，
  * 判断是否有值得注入主会话的实质信息；若有，经 inject_deliver 提交，收尾时由
  * sessionController.prompt() 作为一条 prompt 注入主会话并唤醒主 agent 处理一轮。
  *
@@ -22,18 +22,17 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '2.0.0';
+export const version = '3.0.0';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
-const STORAGE_VERSION = 2;
+const STORAGE_VERSION = 3;
 const TRIGGER_TURN_END = 'turn-end';
-const MAX_MEMO_CHARS = 64 * 1024;
 const MAX_INJECT_PREFIX = 120;
 const MAX_KEPT_RUNS = 200;
 /** 注入消息的固定前缀：用于识别“这一轮是注入唤醒的”，避免审阅无限自触发。 */
 const INJECT_PREFIX = '[注入·';
-const SUBAGENT_TOOLS = ['inject_context_read', 'inject_memo_read', 'inject_memo_write', 'inject_deliver'];
+const SUBAGENT_TOOLS = ['inject_context_read', 'inject_deliver'];
 /** turn/end 原因中属于日志修复/分叉种子生成的合成事件，不是真实对话结束。 */
 const SYNTHETIC_TURN_END = new Set(['interrupted', 'forked']);
 /** 重建注入判断时最多回看的最近事件数（插件中途重载、丢失增量状态时的兜底）。 */
@@ -48,18 +47,20 @@ function storageFile(ctx) {
 }
 
 function defaultState() {
-  return { version: STORAGE_VERSION, tasks: {}, memos: {}, templates: {}, runs: [] };
+  return { version: STORAGE_VERSION, tasks: {}, templates: {}, runs: [] };
 }
 
-/** v1 → v2：定时任务改为“每轮对话结束触发”，删掉间隔/下次运行字段。 */
+/** v1 → v3：定时任务改为“每轮对话结束触发”，删掉间隔/下次运行字段与 memo 开关。 */
 function migrateTask(task) {
   const next = task && typeof task === 'object' ? { ...task } : {};
   delete next.everySeconds;
   delete next.nextRunAt;
+  delete next.useMemo;
   next.trigger = TRIGGER_TURN_END;
   return next;
 }
 
+/** v2 → v3：per-session memo 已移除，连存储槽一起删掉。 */
 function migrateState(parsed) {
   const state = { ...defaultState(), ...(parsed && typeof parsed === 'object' ? parsed : {}) };
   state.version = STORAGE_VERSION;
@@ -67,7 +68,7 @@ function migrateState(parsed) {
   for (const [id, task] of Object.entries(tasks)) tasks[id] = migrateTask(task);
   state.tasks = tasks;
   if (!Array.isArray(state.runs)) state.runs = [];
-  if (!state.memos || typeof state.memos !== 'object') state.memos = {};
+  delete state.memos;
   if (!state.templates || typeof state.templates !== 'object') state.templates = {};
   return state;
 }
@@ -178,9 +179,8 @@ export function defaultReviewPrompt(task, trigger) {
     '',
     '## 审阅步骤',
     `1. 调用 inject_context_read(sessionId="${task.sessionId}", maxMessages=20) 读取主会话最近的对话内容（用户要求、主 agent 的回复、关键工具结果）。`,
-    `2. 如需参考历史注记，调用 inject_memo_read(sessionId="${task.sessionId}")。`,
-    '3. 判断是否存在值得让主 agent 继续推进的实质信息：未完成的待办、被忽略的用户要求、需要拍板的选择、明显的错误或风险、可以立刻执行的下一步。',
-    '4. 若需要注入：调用 inject_deliver 提交内容，精炼、具体、可执行，直接说明要推进的目标与动作；若没有实质信息：不要调用 inject_deliver（本轮就不注入）。',
+    '2. 判断是否存在值得让主 agent 继续推进的实质信息：未完成的待办、被忽略的用户要求、需要拍板的选择、明显的错误或风险、可以立刻执行的下一步。',
+    '3. 若需要注入：调用 inject_deliver 提交内容，精炼、具体、可执行，直接说明要推进的目标与动作；若没有实质信息：不要调用 inject_deliver（本轮就不注入）。',
     '',
     `本轮结束信息：${turn}，结束原因 ${trigger?.reason ?? 'unknown'}。`,
     '不要为了刷存在感而注入；信息不足时宁可不注入。',
@@ -287,7 +287,6 @@ export function apply(ctx) {
       model: input.model ? String(input.model) : undefined,
       systemPrompt: String(input.systemPrompt ?? ''),
       templateId: input.templateId ? String(input.templateId) : undefined,
-      useMemo: input.useMemo !== false,
       createdAt: nowIso(),
       lastRunAt: undefined,
       runCount: 0,
@@ -304,7 +303,6 @@ export function apply(ctx) {
     if (patch.provider !== undefined) task.provider = patch.provider ? String(patch.provider) : undefined;
     if (patch.model !== undefined) task.model = patch.model ? String(patch.model) : undefined;
     if (patch.systemPrompt !== undefined) task.systemPrompt = String(patch.systemPrompt);
-    if (patch.useMemo !== undefined) task.useMemo = !!patch.useMemo;
     if (patch.enabled !== undefined) task.enabled = !!patch.enabled;
     if (patch.templateId !== undefined) task.templateId = patch.templateId ? String(patch.templateId) : undefined;
     task.trigger = TRIGGER_TURN_END;
@@ -358,21 +356,6 @@ export function apply(ctx) {
     return true;
   }
 
-  /* ── Memo ─────────────────────────────────────────────────────────── */
-
-  function getMemo(sessionId) {
-    return state.memos[sessionId] ?? { sessionId, text: '', updatedAt: undefined };
-  }
-
-  function setMemo(sessionId, text) {
-    const memo = state.memos[sessionId] ?? { sessionId, text: '', updatedAt: undefined };
-    memo.text = String(text ?? '').slice(0, MAX_MEMO_CHARS);
-    memo.updatedAt = nowIso();
-    state.memos[sessionId] = memo;
-    persist();
-    return memo;
-  }
-
   /* ── 运行记录 ─────────────────────────────────────────────────────── */
 
   function pushRun(run) {
@@ -410,56 +393,6 @@ export function apply(ctx) {
           const run = requireActiveSession(args.sessionId);
           const inspection = await sessionController.inspect(run.sessionId);
           return recentMessages(inspection?.events, args.maxMessages ?? 20, args.maxChars ?? 6000);
-        },
-      },
-      {
-        name: 'inject_memo_read',
-        description: '读取本会话的 memo（历史注记）。参数 sessionId 必须是本次审阅任务绑定的会话。',
-        parameters: {
-          type: 'object',
-          properties: { sessionId: { type: 'string', description: '主会话 id' } },
-          required: ['sessionId'],
-        },
-        output: {
-          schema: {
-            type: 'object',
-            properties: {
-              text: { type: 'string' },
-              updatedAt: { oneOf: [{ type: 'string' }, { type: 'null' }] },
-            },
-          },
-          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
-        },
-        async execute(args) {
-          const run = requireActiveSession(args.sessionId);
-          const memo = getMemo(run.sessionId);
-          // updatedAt 未写入时是 undefined：必须给 string/null 合法值，否则输出 schema 校验失败
-          return { text: memo.text, updatedAt: memo.updatedAt ?? null };
-        },
-      },
-      {
-        name: 'inject_memo_write',
-        description: '写入本会话的 memo（mode: replace 覆盖 / append 追加）。参数 sessionId 必须是本次审阅任务绑定的会话。',
-        parameters: {
-          type: 'object',
-          properties: {
-            sessionId: { type: 'string', description: '主会话 id' },
-            text: { type: 'string', description: '要写入的 memo 内容' },
-            mode: { type: 'string', enum: ['replace', 'append'], description: 'replace 覆盖, append 追加' },
-          },
-          required: ['sessionId', 'text'],
-        },
-        output: {
-          schema: { type: 'object', properties: { saved: { type: 'boolean' }, length: { type: 'number' } } },
-          render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
-        },
-        async execute(args) {
-          const run = requireActiveSession(args.sessionId);
-          const mode = args.mode === 'append' ? 'append' : 'replace';
-          const current = getMemo(run.sessionId).text;
-          const next = mode === 'append' ? (current ? `${current}\n\n${String(args.text)}` : String(args.text)) : String(args.text);
-          setMemo(run.sessionId, next);
-          return { saved: true, length: state.memos[run.sessionId].text.length };
         },
       },
       {
@@ -551,17 +484,16 @@ export function apply(ctx) {
       // 3. 审阅子代理 prompt = 用户自定义（模板/规则 systemPrompt，占位符替换）或默认审阅指令。
       const prompt = buildReviewPrompt(task, trigger);
 
-      // 4. 启动子代理（useMemo=false 时不把 memo 工具交给子代理）。
+      // 4. 启动子代理（只给读上下文与提交注入两个工具）。
       const providers = (await subagents.list()) ?? [];
       const provider = providers[0] ?? 'default';
-      const allowTools = task.useMemo === false ? ['inject_context_read', 'inject_deliver'] : SUBAGENT_TOOLS;
       const started = await subagents.start(provider, {
         label: task.name,
         prompt: [{ type: 'text', text: prompt }],
         parent: resolved.agent,
         signal: new AbortController().signal,
         ...(task.provider && task.model ? { agentOptions: { provider: task.provider, model: task.model } } : {}),
-        toolFilter: { allow: allowTools },
+        toolFilter: { allow: SUBAGENT_TOOLS },
       });
       const subagentId = started.id; // 子代理会话：UI 可跳回去看真实过程
 
@@ -775,10 +707,6 @@ export function apply(ctx) {
         const root = await resolveRootSession(String(args.sessionId));
         return ok({ id: args.sessionId, meta: inspection?.meta ?? null, root });
       }
-      case 'memo/get':
-        return resolveRootSession(String(args.sessionId ?? '')).then((root) => ok(getMemo(root)));
-      case 'memo/set':
-        return resolveRootSession(String(args.sessionId ?? '')).then((root) => ok(setMemo(root, args.text)));
       case 'templates/list':
         return ok(Object.values(state.templates).sort((a, b) => (a.updatedAt ?? '').localeCompare(b.updatedAt ?? '')));
       case 'templates/create':

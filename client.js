@@ -19,7 +19,6 @@ window.__ModuleLoader__.load({
       'view.label': '审阅',
       'section.tasks': '审阅规则',
       'section.templates': '模板库',
-      'section.memo': '本会话 Memo',
       'section.runs': '最近审阅',
       'new.task': '新建规则',
       'new.template': '新建模板',
@@ -32,7 +31,6 @@ window.__ModuleLoader__.load({
       'task.prompt': '审阅指令（子代理 System Prompt）',
       'task.prompt.hint': '完整自定义审阅子代理指令（步骤/格式全由你定）；可用占位符 {sessionId} {taskName} {turn} {reason}',
       'task.enabled': '每轮对话结束后自动审阅',
-      'task.useMemo': '读取 Memo',
       'task.template': '从模板填入',
       'task.template.pick': '— 选择模板即填入 —',
       'task.trigger': '每次对话结束',
@@ -50,9 +48,6 @@ window.__ModuleLoader__.load({
       'run.turn': '轮次',
       'run.manual': '手动',
       'run.reason': '结束原因',
-      'memo.save': '保存 Memo',
-      'memo.clear': '清空',
-      'memo.empty': '（空）memo 是子代理与本面板共享的持久笔记，子代理可通过工具读写',
       'template.name': '名称',
       'template.desc': '描述',
       'template.body': '完整审阅子代理指令模板（跨会话通用，支持 {sessionId} {taskName} {turn} {reason}）',
@@ -73,8 +68,6 @@ window.__ModuleLoader__.load({
       'created': '已创建',
       'updated': '已更新',
       'triggered': '已手动触发一次审阅',
-      'memo.saved': 'Memo 已保存',
-      'memo.cleared': 'Memo 已清空',
       'task.name.placeholder': '例如：每轮结束审阅待办',
       'default.model': '默认模型',
     };
@@ -82,7 +75,6 @@ window.__ModuleLoader__.load({
       'view.label': 'Review',
       'section.tasks': 'Review rules',
       'section.templates': 'Templates',
-      'section.memo': 'Session Memo',
       'section.runs': 'Recent reviews',
       'new.task': 'New rule',
       'new.template': 'New template',
@@ -95,7 +87,6 @@ window.__ModuleLoader__.load({
       'task.prompt': 'Review instruction (subagent system prompt)',
       'task.prompt.hint': 'Full custom review subagent instruction (steps/format fully yours); placeholders {sessionId} {taskName} {turn} {reason}',
       'task.enabled': 'Review after every turn',
-      'task.useMemo': 'Read memo',
       'task.template': 'Fill from template',
       'task.template.pick': '— pick a template to fill —',
       'task.trigger': 'on every turn end',
@@ -113,9 +104,6 @@ window.__ModuleLoader__.load({
       'run.turn': 'turn',
       'run.manual': 'manual',
       'run.reason': 'ended',
-      'memo.save': 'Save memo',
-      'memo.clear': 'Clear',
-      'memo.empty': '(empty) the memo is a persistent note shared with review subagents',
       'template.name': 'Name',
       'template.desc': 'Description',
       'template.body': 'Full review subagent instruction template (shared across sessions; supports {sessionId} {taskName} {turn} {reason})',
@@ -136,8 +124,6 @@ window.__ModuleLoader__.load({
       'created': 'Created',
       'updated': 'Updated',
       'triggered': 'Ran one review',
-      'memo.saved': 'Memo saved',
-      'memo.cleared': 'Memo cleared',
       'task.name.placeholder': 'e.g. Review every turn',
       'default.model': 'default model',
     };
@@ -173,8 +159,6 @@ window.__ModuleLoader__.load({
       '.inj-task:hover .inj-actions,.inj-task.confirm .inj-actions{opacity:1}' +
       '.inj-chips{display:flex;flex-wrap:wrap;gap:4px}' +
       '.inj-chip{font-size:11px;padding:1px 8px;border-radius:999px;background:rgba(127,127,127,.12);opacity:.85;white-space:nowrap}' +
-      '.inj-chip.memo{background:rgba(22,163,74,.12);color:#16a34a}' +
-      '.inj-chip.nomemo{background:rgba(127,127,127,.1);opacity:.55}' +
       '.inj-chip.model{background:rgba(37,99,235,.1);color:#2563eb}' +
       /* 开关 */
       '.inj-switch{position:relative;flex:none;width:30px;height:17px;border-radius:999px;background:rgba(127,127,127,.35);border:0;cursor:pointer;padding:0;transition:background .15s}' +
@@ -212,8 +196,6 @@ window.__ModuleLoader__.load({
       '.inj-tpl{display:flex;flex-direction:column;gap:2px;padding:7px 9px;border:1px solid rgba(127,127,127,.2);border-radius:8px}' +
       '.inj-tplHead{display:flex;align-items:center;gap:6px}' +
       '.inj-tplBody{font-family:ui-monospace,monospace;font-size:11px;opacity:.75;white-space:pre-wrap;max-height:96px;overflow:auto}' +
-      /* memo */
-      '.inj-memoHint{font-size:11px;opacity:.55}' +
       /* 运行记录 */
       '.inj-run{display:flex;gap:8px;padding:7px 2px;border-bottom:1px solid rgba(127,127,127,.12)}' +
       '.inj-run:last-child{border-bottom:0}' +
@@ -289,7 +271,6 @@ window.__ModuleLoader__.load({
       const [model, setModel] = react.useState(initial?.model ?? '');
       const [systemPrompt, setSystemPrompt] = react.useState(initial?.systemPrompt ?? '');
       const [enabled, setEnabled] = react.useState(initial?.enabled ?? true);
-      const [useMemo, setUseMemo] = react.useState(initial?.useMemo ?? true);
       const [templateId, setTemplateId] = react.useState('');
       const [managerTpls, setManagerTpls] = react.useState([]);
       const [managerEdit, setManagerEdit] = react.useState(null);
@@ -348,7 +329,6 @@ window.__ModuleLoader__.load({
           model: model || undefined,
           systemPrompt,
           enabled,
-          useMemo,
         });
       };
 
@@ -383,10 +363,6 @@ window.__ModuleLoader__.load({
             jsxs('label', { className: 'inj-check', children: [
               jsx('input', { type: 'checkbox', checked: enabled, onChange: (e) => setEnabled(e.target.checked) }),
               t('task.enabled'),
-            ] }),
-            jsxs('label', { className: 'inj-check', children: [
-              jsx('input', { type: 'checkbox', checked: useMemo, onChange: (e) => setUseMemo(e.target.checked) }),
-              t('task.useMemo'),
             ] }),
           ] }),
           jsx('span', { className: 'inj-spacer' }),
@@ -461,7 +437,6 @@ window.__ModuleLoader__.load({
     function InjectPanel({ sessionId, t }) {
       const [tasks, setTasks] = react.useState([]);
       const [templates, setTemplates] = react.useState([]);
-      const [memo, setMemo] = react.useState('');
       const [runs, setRuns] = react.useState([]);
       const [catalog, setCatalog] = react.useState(null);
       const [editing, setEditing] = react.useState(null);
@@ -471,7 +446,6 @@ window.__ModuleLoader__.load({
       const [isSubagent, setIsSubagent] = react.useState(false);
       const [scope, setScope] = react.useState('session'); // 'session' | 'all'
       const [titles, setTitles] = react.useState({}); // scope=all 时各会话标题
-      const [memoOpen, setMemoOpen] = react.useState(false);
       const [runsOpen, setRunsOpen] = react.useState(true);
       const [runsAll, setRunsAll] = react.useState(false);
 
@@ -481,10 +455,9 @@ window.__ModuleLoader__.load({
           const meta = info?.meta;
           // subagent 会话（origin=subagent 或有父会话）永远不参与注入
           setIsSubagent(!!(meta && (meta.origin === 'subagent' || meta.parentSession !== undefined)));
-          const [ts, tpls, memoVal, rs, cat] = await Promise.all([
+          const [ts, tpls, rs, cat] = await Promise.all([
             hostCall('tasks/list', scope === 'all' ? { scope: 'all' } : { sessionId }),
             hostCall('templates/list'),
-            hostCall('memo/get', { sessionId }),
             hostCall('runs/list', { sessionId, limit: 30 }),
             hostCall('model/catalog').catch(() => null),
           ]);
@@ -496,7 +469,6 @@ window.__ModuleLoader__.load({
             setTasks(ts ?? []);
           }
           setTemplates(tpls ?? []);
-          setMemo(memoVal?.text ?? '');
           setRuns(rs ?? []);
           if (cat) setCatalog(cat);
         } catch (error) {
@@ -529,7 +501,6 @@ window.__ModuleLoader__.load({
                 model: form.model,
                 systemPrompt: form.systemPrompt,
                 enabled: form.enabled,
-                useMemo: form.useMemo,
               },
             });
             flash('ok', t('updated'));
@@ -541,7 +512,6 @@ window.__ModuleLoader__.load({
               model: form.model,
               systemPrompt: form.systemPrompt,
               enabled: form.enabled,
-              useMemo: form.useMemo,
             });
             flash('ok', t('created'));
           }
@@ -576,25 +546,6 @@ window.__ModuleLoader__.load({
           await hostCall('tasks/delete', { id: task.id });
           setConfirmId(null);
           void refresh();
-        } catch (error) {
-          setNotice({ type: 'err', text: error.message });
-        }
-      };
-
-      const saveMemo = async () => {
-        try {
-          await hostCall('memo/set', { sessionId, text: memo });
-          flash('ok', t('memo.saved'));
-        } catch (error) {
-          setNotice({ type: 'err', text: error.message });
-        }
-      };
-
-      const clearMemo = async () => {
-        try {
-          await hostCall('memo/set', { sessionId, text: '' });
-          setMemo('');
-          flash('ok', t('memo.cleared'));
         } catch (error) {
           setNotice({ type: 'err', text: error.message });
         }
@@ -639,7 +590,6 @@ window.__ModuleLoader__.load({
           jsxs('div', { className: 'inj-chips', children: [
             jsx('span', { className: 'inj-chip', children: t('task.trigger') }),
             jsx('span', { className: 'inj-chip model', children: modelText(task) }),
-            jsx('span', { className: 'inj-chip ' + (task.useMemo === false ? 'nomemo' : 'memo'), children: task.useMemo === false ? 'no memo' : 'memo' }),
             jsx('span', { className: 'inj-chip', children: t('last') + ' ' + (task.lastRunAt ? formatRunTime(task.lastRunAt) : t('never')) }),
           ] }),
         ] });
@@ -694,21 +644,6 @@ window.__ModuleLoader__.load({
           : (tasks.length === 0 && !editing
             ? jsx('div', { className: 'inj-empty', children: t('empty.tasks') })
             : tasks.map(renderTaskRow)),
-
-        /* Memo 区（默认折叠） */
-        jsx(Section, {
-          title: t('section.memo'),
-          open: memoOpen,
-          onToggle: () => setMemoOpen(!memoOpen),
-          right: memoOpen ? jsxs(react.Fragment, { children: [
-            jsx('button', { className: 'inj-btn small', onClick: clearMemo, children: t('memo.clear') }),
-            jsx('button', { className: 'inj-btn primary small', onClick: saveMemo, children: t('memo.save') }),
-          ] }) : null,
-          children: jsxs(react.Fragment, { children: [
-            jsx('div', { className: 'inj-memoHint', children: t('memo.empty') }),
-            jsx('textarea', { className: 'inj-textarea', style: { minHeight: 110 }, value: memo, onChange: (e) => setMemo(e.target.value), placeholder: '…' }),
-          ] }),
-        }),
 
         /* 运行记录 */
         jsx(Section, {

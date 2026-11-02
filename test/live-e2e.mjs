@@ -119,7 +119,6 @@ async function main() {
       sessionId,
       name: 'LIVE-E2E-审阅',
       enabled: true,
-      useMemo: false,
       systemPrompt: '这是 live-e2e 测试：调用 inject_context_read(sessionId="{sessionId}", maxMessages=5) 读取主会话最近对话，确认能读到内容。不要调用 inject_deliver。只回复 ok。',
     });
     ruleIds.push(rule.id);

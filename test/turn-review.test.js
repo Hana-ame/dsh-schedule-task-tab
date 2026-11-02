@@ -5,7 +5,7 @@
  *  - which turn/end events may trigger a review (root session only, not synthetic,
  *    not a turn woken by our own injection),
  *  - prompt assembly (placeholders + default review instruction),
- *  - v1 → v2 storage migration (drop timer fields).
+ *  - v1/v2 → v3 storage migration (drop timer fields and per-session memo).
  *
  * Run with: node --test test/
  */
@@ -77,25 +77,27 @@ test('custom systemPrompt replaces placeholders and still contains {turn}', () =
 test('empty systemPrompt falls back to the default review instruction', () => {
   const prompt = buildReviewPrompt(task, { turn: 2, reason: 'completed' });
   assert.equal(prompt, defaultReviewPrompt(task, { turn: 2, reason: 'completed' }));
-  for (const hint of ['inject_context_read', 'inject_memo_read', 'inject_deliver', 'session-1', '第 2 轮']) {
+  for (const hint of ['inject_context_read', 'inject_deliver', 'session-1', '第 2 轮']) {
     assert.ok(prompt.includes(hint), `default prompt should mention ${hint}`);
   }
 });
 
-test('v1 storage migrates to v2 and drops timer fields', () => {
+test('v1/v2 storage migrates to v3: drops timer fields, useMemo and memos', () => {
   const migrated = migrateState({
     version: 1,
     tasks: {
-      a: { id: 'a', sessionId: 's', name: '旧定时任务', enabled: false, everySeconds: 3600, nextRunAt: '2026-10-14T15:47:01.006Z', systemPrompt: '' },
+      a: { id: 'a', sessionId: 's', name: '旧定时任务', enabled: false, everySeconds: 3600, nextRunAt: '2026-10-14T15:47:01.006Z', useMemo: true, systemPrompt: '' },
     },
-    memos: {},
+    memos: { s: { sessionId: 's', text: '旧 memo', updatedAt: '2026-10-14T15:47:01.006Z' } },
     templates: {},
     runs: [],
   });
-  assert.equal(migrated.version, 2);
+  assert.equal(migrated.version, 3);
   assert.equal(migrated.tasks.a.trigger, 'turn-end');
   assert.equal('everySeconds' in migrated.tasks.a, false);
   assert.equal('nextRunAt' in migrated.tasks.a, false);
+  assert.equal('useMemo' in migrated.tasks.a, false);
+  assert.equal('memos' in migrated, false, 'per-session memo storage must be dropped');
   assert.equal(migrated.tasks.a.name, '旧定时任务');
 });
 
