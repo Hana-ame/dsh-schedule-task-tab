@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.0.0';
+export const version = '3.1.0';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
