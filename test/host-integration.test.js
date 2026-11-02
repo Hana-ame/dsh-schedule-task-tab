@@ -22,6 +22,8 @@ import { apply } from '../index.js';
 
 const ROOT_ID = 'session-root';
 const SUB_ID = 'session-sub';
+/** 消息编辑/重 roll 的版本分支：有 parentSession + isSeeded，但没有 origin。 */
+const FORK_ID = 'session-fork';
 
 function seedState(baseDir, tasks) {
   const file = path.join(baseDir, 'storages', 'inject-manager.json');
@@ -51,8 +53,10 @@ function waitFor(predicate, timeoutMs = 2000) {
 /**
  * Build a fake Cordis context plus fake host services.
  * `subagentScript` is invoked with the registered tools when subagents.start runs.
+ * `sessionMeta` / `sessionEvents` let a test model parent/child sessions (fork
+ * version branches vs. genuine subagent children).
  */
-function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spawn'] } = {}) {
+function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spawn'], sessionMeta = {}, sessionEvents = {} } = {}) {
   const stateFile = seedState(baseDir, tasks);
   const toolDefs = new Map();
   const listeners = new Map();
@@ -78,8 +82,8 @@ function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spaw
   const sessionController = {
     async inspect(sessionId) {
       return {
-        meta: { parentSession: undefined },
-        events: [
+        meta: sessionMeta[sessionId] ?? { parentSession: undefined },
+        events: sessionEvents[sessionId] ?? [
           { type: 'user/message', seq: 0, data: { content: [{ type: 'text', text: '帮我完成插件改造' }] } },
           { type: 'assistant/message', seq: 1, data: { message: { content: [{ type: 'text', text: '已完成，正在验证。' }] } } },
         ],
@@ -293,6 +297,45 @@ test('subagent sessions never trigger a review', async () => {
   await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(readState(harness.stateFile).runs.length, 0);
   assert.equal(harness.startCalls.length, 0);
+});
+
+test('version branch turn/end hits lineage-root rules and injects into the active version', async () => {
+  // 现场故障（2026-11-03）：消息编辑/重 roll 的版本分支带 parentSession 但没有 origin，
+  // 旧实现把「有父会话」当子代理：面板显示“这是子代理会话”、规则被归一到旧版本、
+  // turn/end 按精确 sessionId 匹配 → 版本分支里的审阅静默失效 / 注入打到旧版本。
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask({ systemPrompt: '调用 inject_context_read(sessionId="{sessionId}")，然后 inject_deliver(sessionId="{sessionId}", content="继续推进。")' }) },
+    sessionMeta: {
+      [ROOT_ID]: { parentSession: undefined },
+      [FORK_ID]: { parentSession: ROOT_ID, isSeeded: true, delegationDepth: 0 },
+    },
+    sessionEvents: {
+      [FORK_ID]: [
+        { type: 'user/message', seq: 0, data: { content: [{ type: 'text', text: '版本分支里的最新用户消息' }] } },
+      ],
+    },
+    subagentScript: async ({ tools, options }) => {
+      // prompt 占位符必须换成当前版本会话，否则审阅会去读旧版本的上下文
+      assert.ok(options.prompt[0].text.includes(FORK_ID), 'prompt {sessionId} 必须替换为当前版本会话');
+      assert.ok(!options.prompt[0].text.includes(`"${ROOT_ID}"`), 'prompt 不得指向血缘根旧版本');
+      const read = await tools.get('inject_context_read').execute({ sessionId: FORK_ID, maxMessages: 5 });
+      assert.ok(read.text.includes('版本分支里的最新用户消息'), '读的必须是当前版本会话的上下文');
+      await tools.get('inject_deliver').execute({ sessionId: FORK_ID, content: '继续推进。' });
+    },
+  });
+
+  const forkSession = { id: FORK_ID, header: { parentSession: ROOT_ID, isSeeded: true }, seq: 1, snapshotEvents: () => [] };
+  harness.turnEnd(forkSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+  await waitFor(() => harness.promptCalls.length === 1);
+
+  const run = readState(harness.stateFile).runs[0];
+  assert.equal(run.status, 'ok');
+  assert.equal(run.injected, true);
+  assert.equal(run.sessionId, ROOT_ID, '规则仍绑定在血缘根上');
+  assert.equal(run.targetSessionId, FORK_ID, '运行记录必须标出真正被审阅的版本');
+  assert.equal(harness.promptCalls[0].sessionId, FORK_ID, '注入必须发给当前版本，不是旧的原会话');
 });
 
 test('synthetic turn/end reasons never trigger a review', async () => {

@@ -8,13 +8,21 @@ v3.1 面板人性化改版：头部一句话说明、规则卡带状态与相对
 
 ## 行为
 
-1. Host 半监听 host 平面 `session/event`；主会话（非子代理会话）出现真实 `turn/end` 时，为该会话每条**已启用**的审阅规则排一次审阅。
+1. Host 半监听 host 平面 `session/event`；主会话（非子代理会话）出现真实 `turn/end` 时，为该会话每条**已启用**的审阅规则排一次审阅。子代理判据只有 `origin === 'subagent'` 与 `delegationDepth > 0`；`parentSession` 只表示 fork 血缘（见下节），**不是**子代理判据。
 2. 审阅子代理固定用 `spawn` provider（fresh 上下文，不会把主会话历史 seed 进子会话；缺该 provider 时本轮直接判失败并记录原因，不静默换 provider），只允许两个工具（toolFilter 之外还在子代理 agent scope 上补一道 guard，挡住 preset 带下来的 `list_agents`/`subagent` 等 scoped 工具）：
    - `inject_context_read` 读取主会话最近消息（审阅对话内容）；
    - `inject_deliver` 提交要注入的内容。
 3. 只有调用了 `inject_deliver` 才注入：内容加 `[注入·规则名]` 前缀，经 `sessionController.prompt` 作为一条消息注入并唤醒主 agent；不调用则“本轮不注入”。
 4. **防自唤醒**：`[注入·` 前缀标识注入唤醒的下一轮，该轮 `turn/end` 不再触发审阅；子代理会话与日志修复/分叉产生的合成 `turn/end` 同样跳过。
 5. 同一会话多规则按**有界串行队列**执行（上限 4 条排队），不并发争用运行上下文。
+
+### 版本分支（消息编辑 / 重 roll）
+
+`@agent-stash/dsh-message-edit` 把每个版本做成父链上的子会话（`parentSession` + `isSeeded`，`origin` 为空），**不是**子代理会话，照常参与审阅：
+
+- 规则绑定在**血缘根**（这棵版本树最上面的原会话，创建/列表都按它归一化），同一对话的所有版本共享同一套规则；
+- 任一本的 `turn/end` 都会命中根上的规则，但 `inject_context_read` 与 `inject_deliver` 的目标、以及 `prompt` 注入去向都是**当前活跃的那一版**（运行记录里的 `targetSessionId`），不会读旧版本上下文、也不会唤醒旧版本；
+- 版本分支里点「立即审阅」同样以当前版本为目标。
 
 ## 面板
 

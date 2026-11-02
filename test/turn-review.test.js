@@ -11,12 +11,14 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   buildReviewPrompt,
   decideTurnReview,
   defaultReviewPrompt,
   isInjectedText,
+  isSubagentSessionHeader,
   migrateState,
   recentMessages,
 } from '../index.js';
@@ -32,6 +34,26 @@ test('root session completed turn triggers review', () => {
 test('subagent sessions never trigger review', () => {
   assert.equal(decideTurnReview({ header: { origin: 'subagent' }, event: completed() }).review, false);
   assert.equal(decideTurnReview({ header: { delegationDepth: 2 }, event: completed() }).review, false);
+});
+
+test('subagent predicate is origin/delegationDepth only, never parentSession', () => {
+  assert.equal(isSubagentSessionHeader({ origin: 'subagent' }), true);
+  assert.equal(isSubagentSessionHeader({ delegationDepth: 1 }), true);
+  assert.equal(isSubagentSessionHeader(undefined), false);
+  // 消息编辑/重 roll 的版本分支：有 parentSession + isSeeded，但 origin 为空、depth 0
+  const forkHeader = { parentSession: 'session-original', isSeeded: true, delegationDepth: 0 };
+  assert.equal(isSubagentSessionHeader(forkHeader), false);
+  assert.deepEqual(decideTurnReview({ header: forkHeader, event: completed() }), { review: true });
+});
+
+test('client 侧的 subagent 判据与 host 一致（不把版本分支当子代理）', () => {
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  assert.match(source, /origin === 'subagent'/);
+  assert.match(source, /delegationDepth/);
+  assert.ok(
+    !/meta\.parentSession !== undefined/.test(source),
+    'parentSession 只表示 fork 血缘（版本分支），不能当作子代理判据',
+  );
 });
 
 test('synthetic turn/end reasons never trigger review', () => {

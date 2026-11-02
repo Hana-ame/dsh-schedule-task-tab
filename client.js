@@ -857,8 +857,10 @@ window.__ModuleLoader__.load({
         try {
           const info = await hostCall('session/info', { sessionId }).catch(() => null);
           const meta = info?.meta;
-          // subagent 会话（origin=subagent 或有父会话）永远不参与注入
-          setIsSubagent(!!(meta && (meta.origin === 'subagent' || meta.parentSession !== undefined)));
+          // 只有真正的子代理会话（origin=subagent / delegationDepth>0）不参与注入。
+          // 不能用 parentSession 判断：消息编辑/重 roll 的版本分支只是 fork 血缘，
+          // 带 parentSession 但 origin 为空——误判会让「审阅」tab 在版本分支里整块拒载。
+          setIsSubagent(!!(meta && (meta.origin === 'subagent' || (meta.delegationDepth ?? 0) > 0)));
           const [ts, tpls, rs, cat] = await Promise.all([
             hostCall('tasks/list', scope === 'all' ? { scope: 'all' } : { sessionId }),
             hostCall('templates/list'),
@@ -959,7 +961,8 @@ window.__ModuleLoader__.load({
         if (runningId) return;
         setRunningId(task.id);
         try {
-          await hostCall('tasks/runNow', { id: task.id });
+          // 带上当前会话：版本分支里点「立即审阅」，注入回当前版本而不是规则绑定的旧版本
+          await hostCall('tasks/runNow', { id: task.id, sessionId });
           flash('ok', t('triggered'));
           void refresh();
         } catch (error) {

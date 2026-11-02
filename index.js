@@ -194,6 +194,19 @@ export function buildReviewPrompt(task, trigger) {
 }
 
 /**
+ * 会话 header 是否为“子代理会话”（纯函数，便于测试）。
+ *
+ * 判据只有 `origin === 'subagent'` 与 `delegationDepth > 0`。**不能**用
+ * `parentSession !== undefined`：按 DSH 的 SessionHeader 契约，parentSession 只表示
+ * fork 血缘（"The session this one was forked from (seed lineage)"）；消息编辑/重 roll
+ * 产生的版本分支同样带 parentSession，却没有 origin。把“有父会话”当子代理，会让
+ * 版本分支被误判（面板显示“这是子代理会话”，规则被归一化到旧版本），审阅静默失效。
+ */
+export function isSubagentSessionHeader(header) {
+  return header?.origin === 'subagent' || (header?.delegationDepth ?? 0) > 0;
+}
+
+/**
  * 判断一个 turn/end 事件是否应触发审阅（纯函数，便于测试）。
  *
  * @param {object} input
@@ -205,7 +218,7 @@ export function buildReviewPrompt(task, trigger) {
  */
 export function decideTurnReview({ header, event, tracked, fallbackInjected } = {}) {
   if (!event || event.type !== 'turn/end') return { review: false, skip: 'not-turn-end' };
-  if (header?.origin === 'subagent' || (header?.delegationDepth ?? 0) > 0) {
+  if (isSubagentSessionHeader(header)) {
     return { review: false, skip: 'subagent-session' };
   }
   const kind = event.data?.reason?.kind;
@@ -245,9 +258,13 @@ export function apply(ctx) {
   const MAX_QUEUED_REVIEWS = 4;
 
   /**
-   * 沿 parentSession 链向上解析"主根会话"：审阅注入永远面向真正的主 agent，
-   * 绝不把子代理会话（origin=subagent、有父会话）当作目标。inspect 失败时
-   * 回退为原值，避免在会话刚创建/不可读时挡住建规则。
+   * 沿 parentSession 链向上解析“会话血缘根”：
+   * - 子代理会话（origin=subagent / delegationDepth>0）→ 真正的主 agent 会话；
+   * - 消息编辑/重 roll 的版本分支（有 parentSession、无 origin）→ 这棵树最上面的原会话。
+   *
+   * 血缘根只用于规则绑定与列表匹配（同一对话的各版本共享一套规则）；
+   * 注入目标始终是“结束这一轮的那个会话”（onTurnEnd 的 targetSessionId），
+   * 绝不把注入发到旧版本或子代理会话。inspect 失败时回退为原值，避免挡住建规则。
    */
   async function resolveRootSession(id) {
     let current = String(id ?? '');
@@ -435,6 +452,8 @@ export function apply(ctx) {
       taskId: task.id,
       taskName: task.name,
       sessionId: task.sessionId,
+      // 本轮实际被审阅的会话：消息编辑/重 roll 的版本分支可能 ≠ 规则绑定的血缘根
+      ...(partial.targetSessionId === undefined ? {} : { targetSessionId: partial.targetSessionId }),
       trigger: TRIGGER_TURN_END,
       turn: partial.turn,
       reason: partial.reason,
@@ -484,8 +503,11 @@ export function apply(ctx) {
    */
   async function triggerTask(task, trigger = {}) {
     const startedAt = nowIso();
-    const sessionId = task.sessionId;
-    // 同一会话同时只跑一个审阅：activeRun 里三个工具按 sessionId 定位运行上下文。
+    // 规则绑定在血缘根（task.sessionId），但上下文读取、工具定位与注入都必须面向
+    // “结束这一轮的那个会话”：消息编辑/重 roll 的版本分支 ≠ 旧的原会话。
+    const sessionId = String(trigger.targetSessionId ?? task.sessionId);
+    const record = (partial) => recordRun(task, { targetSessionId: sessionId, ...partial });
+    // 同一目标会话同时只跑一个审阅：activeRun 里三个工具按 sessionId 定位运行上下文。
     if (activeRuns.has(sessionId)) {
       return { status: 'skipped', reason: 'busy' };
     }
@@ -493,10 +515,10 @@ export function apply(ctx) {
     activeRuns.set(sessionId, run);
     let disposeChildGuard = () => {};
     try {
-      // 1. 拿到主会话的 Agent 作为子代理父级。
+      // 1. 拿到目标会话的 Agent 作为子代理父级。
       const resolved = await sessionController.resolveAgent(sessionId);
       if (!resolved || !('agent' in resolved) || !resolved.agent) {
-        recordRun(task, { startedAt, turn: trigger.turn, reason: trigger.reason, manual: trigger.manual, status: 'failed', error: `无法解析会话 agent: ${JSON.stringify(resolved)}` });
+        record({ startedAt, turn: trigger.turn, reason: trigger.reason, manual: trigger.manual, status: 'failed', error: `无法解析会话 agent: ${JSON.stringify(resolved)}` });
         return { status: 'failed', error: 'resolve-agent' };
       }
 
@@ -505,20 +527,21 @@ export function apply(ctx) {
         try {
           await llm.resolveModelInfo(task.provider, task.model);
         } catch (modelError) {
-          recordRun(task, { startedAt, turn: trigger.turn, reason: trigger.reason, manual: trigger.manual, status: 'failed', error: `model 不可用: ${messageOf(modelError)}` });
+          record({ startedAt, turn: trigger.turn, reason: trigger.reason, manual: trigger.manual, status: 'failed', error: `model 不可用: ${messageOf(modelError)}` });
           return { status: 'failed', error: 'model-unavailable' };
         }
       }
 
       // 3. 审阅子代理 prompt = 用户自定义（模板/规则 systemPrompt，占位符替换）或默认审阅指令。
-      const prompt = buildReviewPrompt(task, trigger);
+      //    用目标会话 id 替换占位符，否则子代理会去读血缘根（旧版本）的上下文。
+      const prompt = buildReviewPrompt({ ...task, sessionId }, trigger);
 
       // 4. 启动子代理（只给读上下文与提交注入两个工具）。
       // 固定用 spawn（fresh 上下文）：fork 会把主会话全量日志 seed 进子会话，成本和行为都会漂移；
       // 也不能用 providers[0]——provider 注册顺序可能变化。缺 spawn 时本轮判失败，不静默换 provider。
       const providers = (await subagents.list()) ?? [];
       if (!providers.includes('spawn')) {
-        recordRun(task, {
+        record({
           startedAt,
           turn: trigger.turn,
           reason: trigger.reason,
@@ -551,7 +574,7 @@ export function apply(ctx) {
       const pending = run.pendingInjection;
       if (!pending) {
         // 子代理没有调用 inject_deliver → 本轮不注入（审阅结论：无实质信息）。
-        recordRun(task, {
+        record({
           startedAt,
           subagentSessionId: subagentId,
           turn: trigger.turn,
@@ -577,7 +600,7 @@ export function apply(ctx) {
         new AbortController().signal,
       );
 
-      recordRun(task, {
+      record({
         startedAt,
         subagentSessionId: subagentId,
         turn: trigger.turn,
@@ -589,7 +612,7 @@ export function apply(ctx) {
       });
       return { status: 'ok', injected: true, injectedBrief: pending.slice(0, 200) };
     } catch (error) {
-      recordRun(task, {
+      record({
         startedAt,
         turn: trigger.turn,
         reason: trigger.reason,
@@ -674,8 +697,14 @@ export function apply(ctx) {
     return { queued: true };
   }
 
-  /** 主会话一轮对话结束：为每条启用的审阅规则排一次审阅。 */
-  function onTurnEnd(session, event) {
+  /**
+   * 主会话一轮对话结束：为血缘根上每条启用的审阅规则排一次审阅。
+   *
+   * 规则绑在血缘根（消息编辑/重 roll 前后同一套规则）；触发则看整个对话树：
+   * 版本分支的 turn/end 也要命中根上的规则，但 `targetSessionId` 记录本轮真正
+   * 活跃的会话，注入只发给它，绝不发给旧版本分支。
+   */
+  async function onTurnEnd(session, event) {
     if (!sessionController || !subagents || !tools) return; // 服务尚未就绪
     const sessionId = String(session?.id ?? '');
     if (!sessionId) return;
@@ -690,10 +719,18 @@ export function apply(ctx) {
     });
     if (!decision.review) return;
 
-    const tasks = Object.values(state.tasks).filter((task) => task.enabled && task.sessionId === sessionId);
+    // 没有任何启用规则时不做血缘解析（inspect 链是异步调用，避免每轮白跑）。
+    const enabled = Object.values(state.tasks).filter((task) => task.enabled);
+    if (enabled.length === 0) return;
+    const root = await resolveRootSession(sessionId);
+    const tasks = enabled.filter((task) => task.sessionId === sessionId || task.sessionId === root);
     if (tasks.length === 0) return;
-    const trigger = { turn: event.data?.turn, reason: event.data?.reason?.kind ?? 'unknown' };
-    console.log(`[inject-manager] turn ended → review: session=${sessionId} turn=${trigger.turn} rules=${tasks.length}`);
+    const trigger = {
+      turn: event.data?.turn,
+      reason: event.data?.reason?.kind ?? 'unknown',
+      targetSessionId: sessionId,
+    };
+    console.log(`[inject-manager] turn ended → review: session=${sessionId} root=${root} turn=${trigger.turn} rules=${tasks.length}`);
     for (const task of tasks) scheduleReview(task, trigger);
   }
 
@@ -702,7 +739,11 @@ export function apply(ctx) {
     if (!session || !event) return;
     try {
       trackTurnEvent(session, event);
-      if (event.type === 'turn/end') onTurnEnd(session, event);
+      if (event.type === 'turn/end') {
+        onTurnEnd(session, event).catch((error) => {
+          console.warn(`[inject-manager] turn-end handler failed: ${messageOf(error)}`);
+        });
+      }
     } catch (error) {
       console.warn(`[inject-manager] session event handler failed: ${messageOf(error)}`);
     }
@@ -747,12 +788,17 @@ export function apply(ctx) {
         return ok(updateTask(String(args.id), { enabled: !!args.enabled }));
       case 'tasks/runNow':
         // 手动审阅：等这一轮审阅结束再回包，UI 能直接看到注入/未注入结果。
+        // 传了 sessionId 就以它为目标（版本分支里点「立即审阅」，注入回当前版本而非旧版本）。
         return Promise.resolve(triggerTask(
           taskById(String(args.id)) ?? (() => { throw new Error(`任务不存在: ${args.id}`); })(),
-          { reason: 'manual', manual: true },
+          {
+            reason: 'manual',
+            manual: true,
+            ...(args.sessionId ? { targetSessionId: String(args.sessionId) } : {}),
+          },
         )).then((value) => ok(value));
       case 'session/info': {
-        // 调试：返回会话身份链（origin/parent/delegationDepth）与主根归一化结果
+        // 调试：返回会话身份链（origin/parent/delegationDepth）与血缘根归一化结果
         const inspection = await sessionController.inspect(String(args.sessionId));
         const root = await resolveRootSession(String(args.sessionId));
         return ok({ id: args.sessionId, meta: inspection?.meta ?? null, root });
