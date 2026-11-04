@@ -1,5 +1,5 @@
 /**
- * Live end-to-end test for inject-manager v2 (turn-end review → optional inject).
+ * Live end-to-end test for inject-manager (turn-end review → optional inject).
  *
  * Exercises the real running dsh-web host over its authenticated HTTP surface —
  * no fake Cordis context. What it proves, in order:
@@ -8,8 +8,8 @@
  *      (not via runNow), records a run with trigger=turn-end/manual=false;
  *   3. a second review that calls inject_deliver wakes the main session: the
  *      injected `[注入·…]` user message starts a new turn;
- *   4. the injected turn's `turn/end` does NOT trigger another review
- *      (self-wake loop guard) and the run count stays put;
+ *   4. the injected turn's `turn/end` IS reviewed again (v3.4 chain review) and
+ *      the rule's chain budget eventually stops the self-wake loop;
  *   5. rules can be cleaned up and the scratch session archived.
  *
  * Usage (the token is the launch token `dsh web` printed, found again in the
@@ -161,17 +161,36 @@ async function main() {
     });
     console.log('[live-e2e] PASS injected [注入·…] user message opened turn 3');
 
-    // ── 3) loop guard: the injected turn's end triggers no further review ─
+    // ── 3) v3.4 chain review: the injected turn's end IS reviewed again ──
     await waitFor('injected turn 3 to finish', async () => {
       const events = await sessionEvents(sessionId);
       return events.some((event) => event.type === 'turn/end' && event.data?.turn === 3);
     });
     console.log('[live-e2e] PASS injected turn 3 completed');
+
+    // 旧行为（≤3.3.1）在这里 runs 停在 2；v3.4 起注入轮继续审阅。
+    const chainRun = await waitFor('injected turn 3 to be reviewed (v3.4 chain review)', async () => {
+      const runs = await plugin('runs/list', { sessionId, limit: 20 });
+      return runs.find((run) => run.taskId === rule.id && run.turn === 3);
+    });
+    assert(chainRun.injectedTurn === true, 'chain run must be flagged as an injected turn');
+    assert(chainRun.chainDepth === 1, `first injected turn must have chainDepth 1, got ${chainRun.chainDepth}`);
+    console.log(`[live-e2e] PASS injected turn 3 reviewed (chainDepth=${chainRun.chainDepth})`);
+
+    // 链上限兜底：等它自然收敛，确认不会无限自唤醒。
     await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
-    const runsAfter = await plugin('runs/list', { sessionId, limit: 10 });
+    const runsAfter = await plugin('runs/list', { sessionId, limit: 50 });
     const forRule = runsAfter.filter((run) => run.taskId === rule.id);
-    assert(forRule.length === 2, `loop guard failed: expected 2 runs, found ${forRule.length}`);
-    console.log(`[live-e2e] PASS loop guard (runs stayed at ${forRule.length})`);
+    // 真正跑过子代理的审阅（status ok）链深不得超过默认预算 3；
+    // 被预算拦下的那一层会留一条 status='skipped' + skip='chain-limit' 的记录（链深 4），
+    // 那正是「链被截断」的证据，不算越界。
+    const reviewed = forRule.filter((run) => run.status === 'ok');
+    const deepest = Math.max(0, ...reviewed.map((run) => Number(run.chainDepth) || 0));
+    assert(deepest <= 3, `reviewed chain depth ${deepest} exceeded the default budget 3`);
+    const skipped = forRule.filter((run) => run.skip === 'chain-limit');
+    assert(skipped.length >= 1, 'the chain must be stopped by a visible chain-limit skip record');
+    assert(skipped.every((run) => (Number(run.chainDepth) || 0) > 3), 'chain-limit skip must record the over-budget depth');
+    console.log(`[live-e2e] PASS chain budget holds (reviewed=${reviewed.length}, maxDepth=${deepest}, chainLimitSkips=${skipped.length})`);
 
     console.log('[live-e2e] ALL CHECKS PASSED');
   } finally {
