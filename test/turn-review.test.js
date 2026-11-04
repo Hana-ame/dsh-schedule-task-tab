@@ -19,6 +19,7 @@ import {
   decideTurnReview,
   defaultReviewPrompt,
   exceedsChainLimit,
+  extractUserInputs,
   isInjectedText,
   isSubagentSessionHeader,
   migrateState,
@@ -192,4 +193,71 @@ test('recentMessages reads user/assistant/tool text and budgets from the newest 
   const tiny = recentMessages(events, 10, 50);
   assert.equal(tiny.messageCount, 1);
   assert.ok(tiny.text.includes('tool'), 'newest message must survive the budget');
+});
+
+test('extractUserInputs returns ALL human inputs, not just a rolling window', () => {
+  const events = [];
+  let seq = 0;
+  for (let turn = 1; turn <= 40; turn += 1) {
+    events.push({ type: 'turn/start', seq: seq++, data: { turn } });
+    events.push({ type: 'user/message', seq: seq++, time: turn, data: { content: [{ type: 'text', text: `需求${turn}` }] } });
+    events.push({ type: 'assistant/message', seq: seq++, data: { message: { content: [{ type: 'text', text: `回复${turn}` }] } } });
+  }
+  const all = extractUserInputs(events);
+  assert.equal(all.count, 40, 'every human input must be present');
+  assert.ok(all.text.includes('需求1'), 'the earliest requirement must survive (that is the whole point)');
+  assert.ok(all.text.includes('需求40'), 'the latest requirement must be present too');
+  // 与滚动窗口对比：recentMessages 只看最近几条
+  const window = recentMessages(events, 5);
+  assert.ok(!window.text.includes('需求1'), 'rolling window drops early requirements — exactly the bug this tool fixes');
+});
+
+test('extractUserInputs filters injected messages and runtime noise by default', () => {
+  const events = [
+    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+    { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: '真正的用户要求' }] } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [{ type: 'text', text: 'Time sampled while preparing turn 1, step 1: ...' }] } },
+    { type: 'user/message', seq: 3, time: 3, data: { content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.' }] } },
+    { type: 'user/message', seq: 4, time: 4, data: { content: [{ type: 'text', text: '<system-reminder> workspace instructions </system-reminder>' }] } },
+    { type: 'user/message', seq: 5, time: 5, data: { content: [{ type: 'text', text: 'background job bash-1 (bash: echo hi) finished with exit code 0' }] } },
+    { type: 'user/message', seq: 6, time: 6, data: { content: [{ type: 'text', text: '[model changed: assistant turns above]' }] } },
+    { type: 'user/message', seq: 7, time: 7, data: { content: [{ type: 'text', text: '[注入·规则] 请继续推进' }] } },
+    { type: 'user/message', seq: 8, time: 8, data: { content: [{ type: 'text', text: '第二条真正的用户要求' }] } },
+  ];
+  const result = extractUserInputs(events);
+  assert.equal(result.count, 2, 'only the two real human inputs');
+  assert.equal(result.skipped, 6);
+  assert.ok(result.text.includes('真正的用户要求'));
+  assert.ok(result.text.includes('第二条真正的用户要求'));
+  assert.ok(!result.text.includes('Time sampled'));
+  assert.ok(!result.text.includes('[注入·'));
+  // 开关打开后注入消息可见（审阅链自查需要）
+  assert.equal(extractUserInputs(events, { includeInjected: true }).count, 3);
+  assert.equal(extractUserInputs(events, { includeRuntime: true }).count, 7);
+});
+
+test('extractUserInputs tags seq/turn and truncates long input', () => {
+  const events = [
+    { type: 'turn/start', seq: 9, data: { turn: 5 } },
+    { type: 'user/message', seq: 10, time: 123, data: { content: [{ type: 'text', text: 'x'.repeat(5000) }] } },
+  ];
+  const result = extractUserInputs(events, { maxEach: 300 });
+  assert.equal(result.inputs[0].seq, 10);
+  assert.equal(result.inputs[0].turn, 5);
+  assert.equal(result.inputs[0].time, 123);
+  assert.ok(result.inputs[0].text.length <= 320, 'per-input truncation must apply');
+  assert.ok(result.text.includes('…(截断)'));
+});
+
+test('extractUserInputs honours the char budget from the OLDEST end', () => {
+  const events = [];
+  let seq = 0;
+  for (let turn = 1; turn <= 30; turn += 1) {
+    events.push({ type: 'turn/start', seq: seq++, data: { turn } });
+    events.push({ type: 'user/message', seq: seq++, time: turn, data: { content: [{ type: 'text', text: `需求${turn}-` + 'y'.repeat(200) }] } });
+  }
+  const result = extractUserInputs(events, { maxChars: 900 });
+  assert.ok(result.text.includes('需求1-'), 'oldest requirements are kept first');
+  assert.ok(!result.text.includes('需求30-'), 'newest ones fall outside the budget');
+  assert.ok(/超出 \d+ 字符预算/.test(result.text), 'budget overflow must be stated explicitly');
 });

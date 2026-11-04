@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.4.0';
+export const version = '3.5.0';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
@@ -42,7 +42,7 @@ const MAX_CHAIN_CAP = 50;
 const MAX_KEPT_RUNS = 200;
 /** 注入消息的固定前缀：用于识别“这一轮是注入唤醒的”，避免审阅无限自触发。 */
 const INJECT_PREFIX = '[注入·';
-const SUBAGENT_TOOLS = ['inject_context_read', 'inject_deliver'];
+const SUBAGENT_TOOLS = ['inject_context_read', 'inject_user_inputs', 'inject_deliver'];
 /** turn/end 原因中属于日志修复/分叉种子生成的合成事件，不是真实对话结束。 */
 const SYNTHETIC_TURN_END = new Set(['interrupted', 'forked']);
 /** 重建注入判断时最多回看的最近事件数（插件中途重载、丢失增量状态时的兜底）。 */
@@ -128,6 +128,88 @@ function contentText(content) {
   }
   if (typeof content === 'string') return content;
   return '';
+}
+
+/**
+ * 抽取会话里**所有人类 user input**（纯函数，便于测试）。
+ *
+ * 需求：「读取所有 user input」。审阅场景要的是「用户到底要求过什么」的完整清单，
+ * 而 recentMessages 是滚动窗口（只取最近 N 条），会漏掉早期需求——用户后面说
+ * 「你把我说的 X 忘了」时，审阅子代理根本看不到 X。
+ *
+ * 关键取舍：
+ *  - **只收人类输入**：本插件注入的 `[注入·…]`、以及 DSH 自动产生的运行时噪音
+ *    （`Time sampled while preparing…`、`Current runtime context…`、
+ *    `<system-reminder>…`、`background job …` 完成通知、`[model changed: …]`）
+ *    都不是用户要求，混进来会稀释「用户到底要什么」，默认过滤掉。
+ *  - `includeInjected` 可打开（审阅链自查时需要看到自己注入过什么）。
+ *  - 每条带 seq / turn / 时间，便于审阅子代理引用与核对。
+ *
+ * @param {object[]} events - SessionInspection.events
+ * @param {object} [options]
+ * @param {number} [options.maxChars] - 总字符预算，默认 12000（从头装，保留最早需求）
+ * @param {boolean} [options.includeInjected] - 是否包含本插件注入的消息，默认 false
+ * @param {boolean} [options.includeRuntime] - 是否包含运行时噪音，默认 false
+ * @param {number} [options.maxEach] - 单条截断长度，默认 2000
+ * @returns {{inputs: object[], text: string, count: number, skipped: number}}
+ */
+export function extractUserInputs(events, options = {}) {
+  const maxChars = Math.max(200, Number(options.maxChars) || 12000);
+  const maxEach = Math.max(100, Number(options.maxEach) || 2000);
+  const includeInjected = options.includeInjected === true;
+  const includeRuntime = options.includeRuntime === true;
+
+  /** 本插件注入 / DSH 运行时噪音：都不是「用户要求」。 */
+  const isRuntimeNoise = (text) => (
+    /^\s*Time sampled while preparing\b/.test(text)
+    || /^\s*Current runtime context\b/.test(text)
+    || /^\s*<system-reminder>/.test(text)
+    || /^\s*background job \S+ \(/.test(text)
+    || /^\s*\[model changed:/.test(text)
+    || /^\s*This snapshot supersedes earlier runtime-context snapshots\b/.test(text)
+  );
+
+  const inputs = [];
+  let turn;
+  let skipped = 0;
+  for (const event of events ?? []) {
+    if (event?.type === 'turn/start') {
+      turn = event.data?.turn;
+      continue;
+    }
+    if (event?.type !== 'user/message') continue;
+    let text = contentText(event.data?.content);
+    if (!text) text = contentText(event.data?.message?.content);
+    if (!text) continue;
+    const injected = isInjectedText(text);
+    // 注入消息与运行时噪音都不是「用户要求」；两个开关各自独立控制。
+    if (injected && !includeInjected) { skipped += 1; continue; }
+    if (!injected && isRuntimeNoise(text) && !includeRuntime) { skipped += 1; continue; }
+    if (text.length > maxEach) text = `${text.slice(0, maxEach)}…(截断)`;
+    inputs.push({
+      seq: event.seq,
+      turn: event.data?.turn ?? turn,
+      time: event.time,
+      injected,
+      text,
+    });
+  }
+
+  // 预算从最早一条往后装：用户最初的要求最重要，宁可丢尾部。
+  const parts = [];
+  let used = 0;
+  for (const item of inputs) {
+    const label = item.turn === undefined ? `#${item.seq}` : `#${item.seq} 第 ${item.turn} 轮`;
+    const head = `${label}${item.injected ? '（本插件注入，非用户原话）' : ''}`;
+    const piece = `${head}\n${item.text}`;
+    if (parts.length && used + piece.length + 2 > maxChars) {
+      parts.push(`…(还有 ${inputs.length - parts.length} 条 user input 超出 ${maxChars} 字符预算，已省略)`);
+      break;
+    }
+    parts.push(piece);
+    used += piece.length + 2;
+  }
+  return { inputs, text: parts.join('\n\n'), count: inputs.length, skipped };
 }
 
 /** 判断一条 user 消息是否为本插件注入的提示。 */
@@ -218,9 +300,10 @@ export function defaultReviewPrompt(task, trigger) {
     '',
     '## 审阅步骤',
     `1. 调用 inject_context_read(sessionId="${task.sessionId}", maxMessages=20) 读取主会话最近的对话内容（用户要求、主 agent 的回复、关键工具结果）。`,
-    '2. 判断是否存在值得让主 agent 继续推进的实质信息：未完成的待办、被忽略的用户要求、需要拍板的选择、明显的错误或风险、可以立刻执行的下一步。',
-    '3. 若需要注入：调用 inject_deliver 提交内容，精炼、具体、可执行，直接说明要推进的目标与动作；若没有实质信息：不要调用 inject_deliver（本轮就不注入）。',
-    '4. 独立验证，不要只信主 agent 的自我汇报：它说「已完成/已上线/测试通过」时，看工具结果与文件/命令输出，别被口头的状态形容词骗过去。',
+    `2. 需要核对「用户到底要求过什么」时，调用 inject_user_inputs(sessionId="${task.sessionId}") 拿**所有人类 user input 的完整清单**——它是全量的，能发现滚动窗口里已经滚出去的早期需求。拿用户原话和主 agent 的实际产出逐条对照，找出被漏掉或曲解的要求。`,
+    '3. 判断是否存在值得让主 agent 继续推进的实质信息：未完成的待办、被忽略的用户要求、需要拍板的选择、明显的错误或风险、可以立刻执行的下一步。',
+    '4. 若需要注入：调用 inject_deliver 提交内容，精炼、具体、可执行，直接说明要推进的目标与动作；若没有实质信息：不要调用 inject_deliver（本轮就不注入）。',
+    '5. 独立验证，不要只信主 agent 的自我汇报：它说「已完成/已上线/测试通过」时，看工具结果与文件/命令输出，别被口头的状态形容词骗过去。',
     '',
     `本轮结束信息：${turn}，结束原因 ${trigger?.reason ?? 'unknown'}。`,
     injectedLine,
@@ -474,6 +557,39 @@ export function apply(ctx) {
           const run = requireActiveSession(args.sessionId);
           const inspection = await sessionController.inspect(run.sessionId);
           return recentMessages(inspection?.events, args.maxMessages ?? 20, args.maxChars ?? 6000);
+        },
+      },
+      {
+        name: 'inject_user_inputs',
+        description:
+          '读取主会话里**所有人类 user input**（完整清单，不是滚动窗口）。用于回答「用户到底要求过什么 / 有没有漏掉早期需求」。'
+          + '默认过滤本插件注入的消息与 DSH 运行时噪音；参数 sessionId 必须是本次审阅任务绑定的会话。',
+        parameters: {
+          type: 'object',
+          properties: {
+            sessionId: { type: 'string', description: '主会话 id' },
+            maxChars: { type: 'number', description: '总字符预算，默认 12000（从最早一条开始装）' },
+            includeInjected: { type: 'boolean', description: '是否包含本插件注入的消息（默认 false）' },
+            includeRuntime: { type: 'boolean', description: '是否包含运行时噪音（默认 false）' },
+          },
+          required: ['sessionId'],
+        },
+        output: {
+          schema: {
+            type: 'object',
+            properties: {
+              text: { type: 'string' },
+              count: { type: 'number' },
+              skipped: { type: 'number' },
+            },
+          },
+          render: (_args, value) => [{ type: 'text', text: String(value?.text ?? '') }],
+        },
+        async execute(args) {
+          const run = requireActiveSession(args.sessionId);
+          const inspection = await sessionController.inspect(run.sessionId);
+          const result = extractUserInputs(inspection?.events, args);
+          return { text: result.text, count: result.count, skipped: result.skipped };
         },
       },
       {
@@ -994,6 +1110,23 @@ export function apply(ctx) {
             ? state.runs.filter((r) => r.sessionId === root || (asked && r.targetSessionId === asked))
             : state.runs;
           return ok(rows.slice(0, limit));
+        });
+      }
+      case 'session/userInputs': {
+        // 面板/外部直接读取某个会话的「所有人类 user input」完整清单。
+        // 与 inject_user_inputs 工具共用同一个纯函数，保证两处口径一致。
+        const target = String(args.sessionId ?? '');
+        if (!target) return err('bad-request', 'sessionId 必需');
+        const inspection = await sessionController.inspect(target);
+        const result = extractUserInputs(inspection?.events, args);
+        return ok({
+          sessionId: target,
+          text: result.text,
+          count: result.count,
+          skipped: result.skipped,
+          inputs: result.inputs.map((item) => ({
+            seq: item.seq, turn: item.turn, time: item.time, injected: item.injected, text: item.text,
+          })),
         });
       }
       case 'model/catalog':

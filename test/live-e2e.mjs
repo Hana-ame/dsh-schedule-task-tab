@@ -24,7 +24,6 @@
 const DEFAULT_BASE = 'http://127.0.0.1:3080';
 const RUN_POLL_MS = 2000;
 const RUN_TIMEOUT_MS = 180000;
-const SETTLE_MS = 20000;
 
 const [argBase, argToken] = process.argv.slice(2);
 const base = (process.env.DSH_WEB_URL || argBase || DEFAULT_BASE).replace(/\/$/, '');
@@ -114,6 +113,17 @@ async function main() {
   const ruleIds = [];
   let archived = false;
   try {
+    // ── 0) session/userInputs：读取所有人类 user input（v3.5） ──────────
+    const allInputs = await plugin('session/userInputs', { sessionId, maxChars: 8000 });
+    assert(typeof allInputs.count === 'number', 'session/userInputs must return a count');
+    assert(Array.isArray(allInputs.inputs), 'session/userInputs must return the inputs array');
+    assert(allInputs.inputs.every((x) => typeof x.text === 'string'), 'each input must carry text');
+    assert(
+      allInputs.inputs.every((x) => !String(x.text).startsWith('Time sampled while preparing')),
+      'runtime noise must be filtered out',
+    );
+    console.log(`[live-e2e] PASS session/userInputs (count=${allInputs.count}, skipped=${allInputs.skipped})`);
+
     // ── 1) automatic trigger on turn/end, no injection ───────────────────
     const rule = await plugin('tasks/create', {
       sessionId,
@@ -178,7 +188,11 @@ async function main() {
     console.log(`[live-e2e] PASS injected turn 3 reviewed (chainDepth=${chainRun.chainDepth})`);
 
     // 链上限兜底：等它自然收敛，确认不会无限自唤醒。
-    await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
+    // 链要完整跑完（每轮都要真实调一次子代理），固定 sleep 不够 —— 用轮询。
+    await waitFor('chain to hit its budget', async () => {
+      const runs = await plugin('runs/list', { sessionId, limit: 50 });
+      return runs.find((run) => run.taskId === rule.id && run.skip === 'chain-limit');
+    }, 300000);
     const runsAfter = await plugin('runs/list', { sessionId, limit: 50 });
     const forRule = runsAfter.filter((run) => run.taskId === rule.id);
     // 真正跑过子代理的审阅（status ok）链深不得超过默认预算 3；

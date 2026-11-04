@@ -2,6 +2,20 @@
 
 DSH Web 插件：**每次主会话一轮对话结束后，自动启动子代理审阅对话内容，判断是否需要注入主会话唤醒主 agent。**
 
+> **v3.5：读取所有 user input**
+>
+> 审阅子代理新增 `inject_user_inputs` 工具（另有同名 RPC `session/userInputs`），
+> 返回会话里**所有人类 user input 的完整清单**——不是 `inject_context_read` 那种滚动窗口。
+> 动机：窗口只留最近 N 条，用户早先提的要求会被挤出去，之后用户说「你把我说的 X 忘了」
+> 时审阅方根本看不到 X。默认过滤本插件注入的消息与 DSH 运行时噪音
+> （`Time sampled…` / `Current runtime context…` / `<system-reminder>` / `background job …` /
+> `[model changed: …]`），可用 `includeInjected` / `includeRuntime` 打开；预算**从最早一条开始装**
+> （早期需求最重要），溢出时显式写出省略了多少条。
+>
+> **这次部署没有重启 dsh-web**：HMR 的 patch 重算复用同一模块 URL、命中 Node ESM 缓存，
+> 改文件不生效。改为在 profile patch 里禁用原 bundle 行、换成
+> `file://…/index.js?rev=<version>` 的同名新行，URL 变了才会真正重新求值（已实测）。
+
 > **v3.4 关键变更（修「只审阅一次」）**
 >
 > v3.3.1 及以前，凡是由本插件注入唤醒的那一轮，`turn/end` 会被直接跳过（`injected-turn`）。
@@ -25,7 +39,8 @@ v3.1 面板人性化改版：头部一句话说明、规则卡带状态与相对
 
 1. Host 半监听 host 平面 `session/event`；主会话（非子代理会话）出现真实 `turn/end` 时，为该会话每条**已启用**的审阅规则排一次审阅。注入唤醒的轮次同样审阅（受 `maxChain` 约束）。子代理判据只有 `origin === 'subagent'` 与 `delegationDepth > 0`；`parentSession` 只表示 fork 血缘（见下节），**不是**子代理判据。
 2. 审阅子代理固定用 `spawn` provider（fresh 上下文，不会把主会话历史 seed 进子会话；缺该 provider 时本轮直接判失败并记录原因，不静默换 provider），只允许两个工具（toolFilter 之外还在子代理 agent scope 上补一道 guard，挡住 preset 带下来的 `list_agents`/`subagent` 等 scoped 工具）：
-   - `inject_context_read` 读取主会话最近消息（审阅对话内容）；
+   - `inject_context_read` 读取主会话最近消息（滚动窗口，审阅当前对话）；
+   - `inject_user_inputs` 读取**所有人类 user input 的完整清单**（找回被窗口挤掉的早期需求）；
    - `inject_deliver` 提交要注入的内容。
 3. 只有调用了 `inject_deliver` 才注入：内容加 `[注入·规则名]` 前缀，经 `sessionController.prompt` 作为一条消息注入并唤醒主 agent；不调用则“本轮不注入”。
 4. **防自唤醒**：`[注入·` 前缀标识注入唤醒的轮次，这类轮次按**注入链深度**继续审阅，但连续注入达到 `maxChain` 就停（默认 3）；子代理会话与日志修复/分叉产生的合成 `turn/end` 始终跳过。人类新消息重置链深度。
@@ -53,6 +68,7 @@ v3.1 面板人性化改版：头部一句话说明、规则卡带状态与相对
 
 - 存储：`$DSH_HOME/storages/inject-manager.json`（JSON，v3）。
 - RPC：`POST /api/inject-manager`，`{method, args}` → `{ok, value|error}`。
+  - `session/userInputs` `{sessionId, maxChars?, includeInjected?, includeRuntime?}` → `{count, skipped, text, inputs[]}`：所有人类 user input 的完整清单。
 
 ## 测试
 

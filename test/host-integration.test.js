@@ -227,6 +227,7 @@ test('boot wires tools, HTTP route and the session/event listener', () => {
   assert.deepEqual([...harness.tools.keys()].sort(), [
     'inject_context_read',
     'inject_deliver',
+    'inject_user_inputs',
   ]);
   assert.equal(harness.getRoute()?.path, '/api/inject-manager');
   assert.equal(typeof harness.listeners.get('session/event'), 'function');
@@ -512,6 +513,7 @@ test('review subagent gets a child-scope guard for the two injection tools only'
   assert.equal(harness.childGuards.length, 1, 'one guard must be armed on the review child');
   const guard = harness.childGuards[0];
   assert.equal(guard.fn({ name: 'inject_context_read' }), undefined);
+  assert.equal(guard.fn({ name: 'inject_user_inputs' }), undefined);
   assert.equal(guard.fn({ name: 'inject_deliver' }), undefined);
   assert.match(String(guard.fn({ name: 'list_agents' })), /只允许调用/);
   assert.equal(guard.active, false, 'guard must be released when the review run settles');
@@ -587,4 +589,62 @@ test('skipped reviews leave a visible record instead of vanishing', async () => 
     new Date(realRun.finishedAt).getTime(),
     'skipped runs must not move lastRunAt',
   );
+});
+
+test('inject_user_inputs tool reads every human input for the active review', async () => {
+  const many = [];
+  for (let turn = 1; turn <= 12; turn += 1) {
+    many.push({ type: 'turn/start', seq: turn * 3, data: { turn } });
+    many.push({ type: 'user/message', seq: turn * 3 + 1, time: turn, data: { content: [{ type: 'text', text: `用户需求${turn}` }] } });
+    many.push({ type: 'user/message', seq: turn * 3 + 2, time: turn, data: { content: [{ type: 'text', text: 'Time sampled while preparing turn ' + turn }] } });
+  }
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask() },
+    sessionEvents: { [ROOT_ID]: many },
+    subagentScript: async ({ tools }) => {
+      const result = await tools.get('inject_user_inputs').execute({ sessionId: ROOT_ID });
+      assert.equal(result.count, 12, 'all 12 human inputs must be returned');
+      assert.ok(result.text.includes('用户需求1'), 'earliest input must be present');
+      assert.ok(result.text.includes('用户需求12'));
+      assert.ok(!result.text.includes('Time sampled'), 'runtime noise must be filtered');
+      // 会话隔离仍然成立
+      await assert.rejects(
+        () => tools.get('inject_user_inputs').execute({ sessionId: 'session-other' }),
+        /没有进行中的审阅任务/,
+      );
+    },
+  });
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+});
+
+test('RPC session/userInputs exposes the same full user-input list', async () => {
+  const events = [
+    { type: 'turn/start', seq: 0, data: { turn: 1 } },
+    { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: '第一件事' }] } },
+    { type: 'user/message', seq: 2, time: 2, data: { content: [{ type: 'text', text: 'Time sampled while preparing turn 1' }] } },
+    { type: 'user/message', seq: 3, time: 3, data: { content: [{ type: 'text', text: '第二件事' }] } },
+  ];
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: {},
+    subagentScript: async () => {},
+    sessionEvents: { [ROOT_ID]: events },
+  });
+  const route = harness.getRoute();
+  const call = (body) => new Promise((resolve, reject) => {
+    const req = (async function* iterate() { yield Buffer.from(JSON.stringify(body)); })();
+    const res = {
+      headers: {},
+      setHeader(k, v) { this.headers[k] = v; },
+      end(text) { resolve({ status: this.statusCode, body: JSON.parse(text) }); },
+    };
+    route.handler(req, res).catch(reject);
+  });
+  const res = await call({ method: 'session/userInputs', args: { sessionId: ROOT_ID } });
+  assert.equal(res.body.ok, true);
+  assert.equal(res.body.value.count, 2);
+  assert.deepEqual(res.body.value.inputs.map((x) => x.text), ['第一件事', '第二件事']);
+  assert.equal(res.body.value.skipped, 1);
 });
