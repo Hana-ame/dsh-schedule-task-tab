@@ -5,20 +5,30 @@
  *  - boot wiring: tools / HTTP route / session/event listener,
  *  - turn/end on a root session triggers one review subagent,
  *  - the review subagent's tools can read context and inject (or not),
- *  - injection wakes the main session via sessionController.prompt and the
- *    resulting injected turn is not reviewed again (no self-wake loop),
+ *  - injection wakes the main session via sessionController.prompt, and the
+ *    resulting injected turn IS reviewed again (v3.4: chain review) until the
+ *    per-rule chain budget stops it (no infinite self-wake loop),
  *  - subagent sessions never trigger review,
  *  - RPC dispatch (tasks/list, tasks/runNow) works.
  *
  * Run with: node --test test/
  */
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 import { apply } from '../index.js';
+
+/** 每个 harness 注册的环境还原动作；整个测试文件跑完统一还原一次。 */
+const harnessRestorers = [];
+after(() => {
+  for (const restore of harnessRestorers) {
+    try { restore(); } catch { /* best effort */ }
+  }
+  harnessRestorers.length = 0;
+});
 
 const ROOT_ID = 'session-root';
 const SUB_ID = 'session-sub';
@@ -58,6 +68,13 @@ function waitFor(predicate, timeoutMs = 2000) {
  */
 function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spawn'], sessionMeta = {}, sessionEvents = {} } = {}) {
   const stateFile = seedState(baseDir, tasks);
+  // 存储路径优先用 DSH_HOME（跨重载稳定）；测试里指向临时目录，避免读写真实状态。
+  const previousHome = process.env.DSH_HOME;
+  process.env.DSH_HOME = baseDir;
+  harnessRestorers.push(() => {
+    if (previousHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousHome;
+  });
   const toolDefs = new Map();
   const listeners = new Map();
   let route = null;
@@ -238,7 +255,9 @@ test('turn/end on a root session triggers a review subagent (no injection path)'
   assert.equal(harness.promptCalls.length, 0, 'no-inject review must not wake the main session');
 });
 
-test('review injection wakes the main session and is not reviewed again (loop guard)', async () => {
+test('review injection wakes the main session and the injected turn is reviewed again (v3.4)', async () => {
+  // 旧行为（≤3.3.1）：注入唤醒的那一轮被直接跳过 → 每条人类消息最多注入一次，
+  // 用户看到的就是「只审阅一次」。v3.4 起注入轮继续审阅（受链上限约束）。
   const harness = createHarness({
     baseDir: makeTempDir(),
     tasks: { 'task-1': baseTask({ systemPrompt: '读取上下文后调用 inject_deliver(sessionId="{sessionId}", content="请继续。")' }) },
@@ -258,10 +277,63 @@ test('review injection wakes the main session and is not reviewed again (loop gu
   const state = readState(harness.stateFile);
   assert.equal(state.runs[0].injected, true);
 
-  // 注入消息唤醒的那一轮结束：识别前缀后不得再次审阅
+  // 注入消息唤醒的那一轮结束：仍然审阅，并记下注入轮标记与链深度
   harness.turnEnd(harness.rootSession, { turn: 2, injected: true });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.equal(readState(harness.stateFile).runs.length, 1, 'injected turn must not trigger another review');
+  await waitFor(() => readState(harness.stateFile).runs.length === 2);
+  const second = readState(harness.stateFile).runs[0];
+  assert.equal(second.turn, 2);
+  assert.equal(second.injectedTurn, true, 'run must record that this was an injected turn');
+  assert.equal(second.chainDepth, 1, 'first injected turn has chain depth 1');
+});
+
+test('injected turns keep being reviewed until the rule chain budget stops the loop', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask({ maxChain: 2, systemPrompt: '调用 inject_deliver(sessionId="{sessionId}", content="继续。")' }) },
+    subagentScript: async ({ tools }) => {
+      await tools.get('inject_deliver').execute({ sessionId: ROOT_ID, content: '继续。' });
+    },
+  });
+
+  // 人类轮 1 → 审阅并注入
+  harness.turnEnd(harness.rootSession, { turn: 1 });
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+
+  // 注入轮 2、3（链深 1、2）→ 都在预算内，继续审阅
+  harness.turnEnd(harness.rootSession, { turn: 2, injected: true });
+  await waitFor(() => readState(harness.stateFile).runs.length === 2);
+  harness.turnEnd(harness.rootSession, { turn: 3, injected: true });
+  await waitFor(() => readState(harness.stateFile).runs.length === 3);
+
+  // 注入轮 4（链深 3 > maxChain 2）→ 停止审阅并留下 skip 记录
+  harness.turnEnd(harness.rootSession, { turn: 4, injected: true });
+  await waitFor(() => readState(harness.stateFile).runs.some((run) => run.skip === 'chain-limit'));
+  const runs = readState(harness.stateFile).runs;
+  assert.equal(runs.filter((run) => run.status === 'ok').length, 3, 'exactly three real reviews');
+  const skipped = runs.find((run) => run.skip === 'chain-limit');
+  assert.equal(skipped.status, 'skipped');
+  assert.equal(skipped.turn, 4);
+  assert.equal(skipped.injectedTurn, true);
+  assert.match(skipped.error, /连续审阅/);
+
+  // 人类再发一条消息 → 链清零，重新拥有完整额度
+  harness.turnEnd(harness.rootSession, { turn: 5 });
+  await waitFor(() => readState(harness.stateFile).runs.some((run) => run.turn === 5 && run.status === 'ok'));
+});
+
+test('a new human turn resets the injected-turn chain budget', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask({ maxChain: 1, systemPrompt: '不要注入。' }) },
+    subagentScript: async () => {},
+  });
+  // 链深到上限后人类轮重新开始
+  harness.turnEnd(harness.rootSession, { turn: 1, injected: true });
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+  harness.turnEnd(harness.rootSession, { turn: 2, injected: true });
+  await waitFor(() => readState(harness.stateFile).runs.some((run) => run.skip === 'chain-limit'));
+  harness.turnEnd(harness.rootSession, { turn: 3 });
+  await waitFor(() => readState(harness.stateFile).runs.some((run) => run.turn === 3 && run.status === 'ok'));
 });
 
 test('multiple enabled rules for one session run sequentially, all of them', async () => {
@@ -458,4 +530,61 @@ test('configured reasoningEffort rides along in the subagent agentOptions', asyn
     model: '6.8-flash-lite',
     reasoningEffort: 'high',
   });
+});
+
+test('maxChain ride-along: creating a rule with reviewNow backfills the current conversation immediately', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: {}, // 空：走 RPC 创建，验证 reviewNow 补审
+    subagentScript: async ({ tools }) => {
+      await tools.get('inject_deliver').execute({ sessionId: ROOT_ID, content: '补审注入。' });
+    },
+  });
+  const route = harness.getRoute();
+  const call = (body) => new Promise((resolve, reject) => {
+    const req = (async function* iterate() { yield Buffer.from(JSON.stringify(body)); })();
+    const res = {
+      headers: {},
+      setHeader(k, v) { this.headers[k] = v; },
+      end(text) { resolve({ status: this.statusCode, body: JSON.parse(text) }); },
+    };
+    route.handler(req, res).catch(reject);
+  });
+
+  const created = await call({
+    method: 'tasks/create',
+    args: { sessionId: ROOT_ID, name: '补审规则', systemPrompt: '不要注入。', maxChain: 3, enabled: true, reviewNow: true },
+  });
+  assert.equal(created.body.ok, true);
+  assert.equal(created.body.value.maxChain, 3, 'maxChain must round-trip through create');
+  assert.equal(created.body.value.reviewNow?.status, 'ok', 'reviewNow must run a review immediately');
+  const state = readState(harness.stateFile);
+  assert.equal(state.runs.length, 1, 'created rule must have one backfill run');
+  assert.equal(state.runs[0].reason, 'created');
+  assert.equal(state.runs[0].manual, false);
+});
+
+test('skipped reviews leave a visible record instead of vanishing', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask({ maxChain: 1, systemPrompt: '不要注入。' }) },
+    subagentScript: async () => {},
+  });
+  harness.turnEnd(harness.rootSession, { turn: 1, injected: true });
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+  harness.turnEnd(harness.rootSession, { turn: 2, injected: true });
+  await waitFor(() => readState(harness.stateFile).runs.some((run) => run.status === 'skipped'));
+  const skipped = readState(harness.stateFile).runs.find((run) => run.status === 'skipped');
+  assert.equal(skipped.skip, 'chain-limit');
+  assert.equal(skipped.taskName, '轮末审阅');
+  assert.match(skipped.error, /规则上限/);
+  // skip 记录不能污染「上次审阅」语义：lastRunAt 停在真正跑过的那次
+  const state = readState(harness.stateFile);
+  const realRun = state.runs.find((run) => run.status === 'ok');
+  assert.ok(realRun, 'the first turn must have produced a real review');
+  assert.equal(
+    new Date(state.tasks['task-1'].lastRunAt).getTime(),
+    new Date(realRun.finishedAt).getTime(),
+    'skipped runs must not move lastRunAt',
+  );
 });

@@ -108,6 +108,16 @@ window.__ModuleLoader__.load({
       'run.status.injected': '已提醒',
       'run.status.skipped': '无需提醒',
       'run.status.failed': '失败',
+      'task.chain': '注入链上限',
+      'task.chain.unit': '轮',
+      'task.chain.hint': '注入唤醒的下一轮也继续审阅，直到连续注入达到这个轮数才停。填 0 = 不限制（最多 50）。默认 3：既保证每轮都审，又不会让主 agent 自问自答到停不下来。',
+      'created.reviewed.injected': '规则已创建，并已立即审阅当前对话（本次有提醒注入）',
+      'created.reviewed.skipped': '规则已创建，并已立即审阅当前对话（本次判断无需提醒）',
+      'run.status.notRun': '未执行',
+      'run.brief.notRun': '本轮没有启动审阅子代理',
+      'run.injectedTurn.title': '这一轮是上一轮注入唤醒的；数字是它在注入链里的位置',
+      'run.chain': '注入链第 {n} 轮',
+      'run.created': '创建规则时补审',
       'run.brief.skipped': '审阅后判断无需提醒',
       'run.subagent': '子代理会话',
       'run.copy': '复制 id',
@@ -209,6 +219,16 @@ window.__ModuleLoader__.load({
       'run.status.injected': 'Nudged',
       'run.status.skipped': 'No nudge',
       'run.status.failed': 'Failed',
+      'task.chain': 'Injection chain limit',
+      'task.chain.unit': 'turns',
+      'task.chain.hint': 'Turns woken by our own injection keep getting reviewed until the chain reaches this many consecutive injections. 0 = unlimited (capped at 50). Default 3: every turn gets reviewed, without letting the main agent talk to itself forever.',
+      'created.reviewed.injected': 'Rule created and the current conversation was reviewed right away (this round it was nudged)',
+      'created.reviewed.skipped': 'Rule created and the current conversation was reviewed right away (nothing to nudge this round)',
+      'run.status.notRun': 'Not run',
+      'run.brief.notRun': 'No review subagent was started for this turn',
+      'run.injectedTurn.title': 'This turn was woken by an injection; the number is its position in the chain',
+      'run.chain': 'Injection chain #{n}',
+      'run.created': 'Backfill on rule create',
       'run.brief.skipped': 'Nothing worth interrupting for',
       'run.subagent': 'Subagent session',
       'run.copy': 'Copy id',
@@ -631,6 +651,7 @@ window.__ModuleLoader__.load({
       const [model, setModel] = react.useState(initial?.model ?? '');
       const [reasoningEffort, setReasoningEffort] = react.useState(initial?.reasoningEffort ?? '');
       const [systemPrompt, setSystemPrompt] = react.useState(initial?.systemPrompt ?? '');
+      const [maxChain, setMaxChain] = react.useState(String(initial?.maxChain ?? 3));
       const [enabled, setEnabled] = react.useState(initial?.enabled ?? true);
       const [templateId, setTemplateId] = react.useState('');
       const [showTemplates, setShowTemplates] = react.useState(false);
@@ -702,6 +723,7 @@ window.__ModuleLoader__.load({
             model: model || undefined,
             reasoningEffort: reasoningEffort || undefined,
             systemPrompt,
+            maxChain,
             enabled,
           });
         } finally {
@@ -770,6 +792,24 @@ window.__ModuleLoader__.load({
               }),
             ] }),
             jsx('div', { className: 'inj-hint', children: t('task.prompt.hint') }),
+          ] }),
+          jsxs('div', { className: 'inj-field full', children: [
+            jsx('label', { className: 'inj-label', children: t('task.chain') }),
+            jsxs('div', { className: 'inj-inlineRow', children: [
+              jsx('input', {
+                className: 'inj-input',
+                type: 'number',
+                min: 0,
+                max: 50,
+                step: 1,
+                style: { maxWidth: 110 },
+                value: maxChain,
+                onChange: (e) => setMaxChain(e.target.value),
+                'aria-label': t('task.chain'),
+              }),
+              jsx('span', { className: 'inj-hint', children: t('task.chain.unit') }),
+            ] }),
+            jsx('div', { className: 'inj-hint', children: t('task.chain.hint') }),
           ] }),
         ] }),
 
@@ -911,21 +951,28 @@ window.__ModuleLoader__.load({
                 model: form.model,
                 reasoningEffort: form.reasoningEffort,
                 systemPrompt: form.systemPrompt,
+                maxChain: form.maxChain,
                 enabled: form.enabled,
               },
             });
             flash('ok', t('updated'));
           } else {
-            await hostCall('tasks/create', {
+            const created = await hostCall('tasks/create', {
               sessionId,
               name: form.name,
               provider: form.provider,
               model: form.model,
               reasoningEffort: form.reasoningEffort,
               systemPrompt: form.systemPrompt,
+              maxChain: form.maxChain,
               enabled: form.enabled,
+              // 建规则时把「之前已经发生的这轮对话」也补审一次，不用等下一条人类消息。
+              reviewNow: true,
             });
-            flash('ok', t('created'));
+            const firstReview = created?.reviewNow;
+            flash('ok', firstReview?.status === 'ok'
+              ? (firstReview.injected ? t('created.reviewed.injected') : t('created.reviewed.skipped'))
+              : t('created'));
           }
           setEditing(null);
           void refresh();
@@ -938,8 +985,13 @@ window.__ModuleLoader__.load({
         if (creating) return;
         setCreating(true);
         try {
-          await hostCall('tasks/create', { sessionId, name: t('quick.name'), systemPrompt: '', enabled: true });
-          flash('ok', t('quick.created'));
+          const created = await hostCall('tasks/create', {
+            sessionId, name: t('quick.name'), systemPrompt: '', maxChain: 3, enabled: true, reviewNow: true,
+          });
+          const firstReview = created?.reviewNow;
+          flash('ok', firstReview?.status === 'ok'
+            ? (firstReview.injected ? t('created.reviewed.injected') : t('created.reviewed.skipped'))
+            : t('quick.created'));
           void refresh();
         } catch (error) {
           setNotice({ type: 'err', text: error.message });
@@ -1129,24 +1181,36 @@ window.__ModuleLoader__.load({
       ] });
 
       const renderRun = (run) => {
+        // status='skipped' 是 v3.4 新加的「没启动子代理就跳过」记录（队列满 / 重复 /
+        // busy / 达到注入链上限），单独一个徽标，避免和「审阅了但判断无需提醒」混淆。
+        const hardSkip = run.status === 'skipped';
         const injected = run.status === 'ok' && run.injected === true;
         const skipped = run.status === 'ok' && run.injected !== true;
-        const failed = run.status !== 'ok';
-        const badgeClass = failed ? 'failed' : (injected ? 'injected' : 'skipped');
-        const badgeText = failed ? t('run.status.failed') : (injected ? t('run.status.injected') : t('run.status.skipped'));
-        const brief = failed ? (run.error || t('run.status.failed')) : (injected ? (run.injectedBrief || '') : t('run.brief.skipped'));
+        const failed = run.status !== 'ok' && !hardSkip;
+        const badgeClass = hardSkip ? 'skipped' : (failed ? 'failed' : (injected ? 'injected' : 'skipped'));
+        const badgeText = hardSkip
+          ? t('run.status.notRun')
+          : (failed ? t('run.status.failed') : (injected ? t('run.status.injected') : t('run.status.skipped')));
+        const brief = hardSkip
+          ? (run.error || t('run.brief.notRun'))
+          : (failed ? (run.error || t('run.status.failed')) : (injected ? (run.injectedBrief || '') : t('run.brief.skipped')));
+        const chainPill = run.injectedTurn
+          ? jsx('span', { className: 'inj-pill', title: t('run.injectedTurn.title'), children: msg('run.chain', { n: run.chainDepth ?? '?' }) })
+          : null;
         const triggerText = run.manual
           ? t('run.manual')
-          : msg('run.turn', { turn: run.turn ?? '?' }) + '（' + reasonText(run.reason) + '）';
+          : (run.reason === 'created' ? t('run.created')
+            : msg('run.turn', { turn: run.turn ?? '?' }) + '（' + reasonText(run.reason) + '）');
         return jsxs('div', { className: 'inj-run', children: [
           jsx('span', { className: 'inj-runBadge ' + badgeClass, children: badgeText }),
           jsxs('div', { className: 'inj-runBody', children: [
             jsxs('div', { className: 'inj-runHead', children: [
               jsx('span', { className: 'inj-runName', children: run.taskName }),
+              chainPill,
               jsx('span', { className: 'inj-runTime', title: formatRunTime(run.startedAt), children: formatRelativeTime(run.startedAt, msg) }),
               jsx('span', { className: 'inj-runTime', children: triggerText }),
             ] }),
-            jsx('div', { className: 'inj-runBrief' + (failed ? ' failed' : ''), children: brief }),
+            jsx('div', { className: 'inj-runBrief' + (failed || hardSkip ? ' failed' : ''), children: brief }),
             run.subagentSessionId
               ? jsx('span', {
                   className: 'inj-runSub',

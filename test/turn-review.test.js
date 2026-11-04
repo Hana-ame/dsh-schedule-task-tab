@@ -1,11 +1,12 @@
 /**
  * Pure-function tests for the turn-end review trigger.
  *
- * These cover the redesign's decision surface without booting Cordis:
+ * These cover the decision surface without booting Cordis:
  *  - which turn/end events may trigger a review (root session only, not synthetic,
- *    not a turn woken by our own injection),
+ *    and for injected turns: the chain-depth budget added in v3.4),
  *  - prompt assembly (placeholders + default review instruction),
- *  - v1/v2 → v3 storage migration (drop timer fields and per-session memo).
+ *  - v1/v2 → v3 storage migration (drop timer fields and per-session memo),
+ *  - chain-limit normalization.
  *
  * Run with: node --test test/
  */
@@ -17,9 +18,11 @@ import {
   buildReviewPrompt,
   decideTurnReview,
   defaultReviewPrompt,
+  exceedsChainLimit,
   isInjectedText,
   isSubagentSessionHeader,
   migrateState,
+  normalizeMaxChain,
   recentMessages,
 } from '../index.js';
 
@@ -28,7 +31,7 @@ const completed = (turn = 3) => ({ type: 'turn/end', data: { turn, reason: { kin
 const task = { sessionId: 'session-1', name: '规则A', systemPrompt: '' };
 
 test('root session completed turn triggers review', () => {
-  assert.deepEqual(decideTurnReview({ header: rootHeader, event: completed() }), { review: true });
+  assert.deepEqual(decideTurnReview({ header: rootHeader, event: completed() }), { review: true, chainDepth: 0 });
 });
 
 test('subagent sessions never trigger review', () => {
@@ -43,7 +46,7 @@ test('subagent predicate is origin/delegationDepth only, never parentSession', (
   // 消息编辑/重 roll 的版本分支：有 parentSession + isSeeded，但 origin 为空、depth 0
   const forkHeader = { parentSession: 'session-original', isSeeded: true, delegationDepth: 0 };
   assert.equal(isSubagentSessionHeader(forkHeader), false);
-  assert.deepEqual(decideTurnReview({ header: forkHeader, event: completed() }), { review: true });
+  assert.deepEqual(decideTurnReview({ header: forkHeader, event: completed() }), { review: true, chainDepth: 0 });
 });
 
 test('client 侧的 subagent 判据与 host 一致（不把版本分支当子代理）', () => {
@@ -67,13 +70,63 @@ test('non turn/end events never trigger review', () => {
   assert.equal(decideTurnReview({ header: rootHeader, event: { type: 'user/message', data: {} } }).review, false);
 });
 
-test('a turn woken by our own injection is not reviewed again (loop guard)', () => {
-  const tracked = { turn: 3, injected: true };
-  assert.deepEqual(decideTurnReview({ header: rootHeader, event: completed(), tracked }), { review: false, skip: 'injected-turn' });
+test('an injected turn IS reviewed while the chain budget lasts (v3.4 fix)', () => {
+  // 旧行为是见注入轮直接跳过 → 每条人类消息最多注入一次，用户看到「只审阅一次」。
+  const tracked = { turn: 3, injected: true, chainDepth: 0 };
+  assert.deepEqual(
+    decideTurnReview({ header: rootHeader, event: completed(), tracked, maxChain: 3 }),
+    { review: true, chainDepth: 1 },
+  );
+  assert.deepEqual(
+    decideTurnReview({ header: rootHeader, event: completed(), tracked: { injected: true, chainDepth: 2 }, maxChain: 3 }),
+    { review: true, chainDepth: 3 },
+  );
+});
+
+test('the injected-turn chain stops at the rule limit instead of looping forever', () => {
+  const tracked = { turn: 9, injected: true, chainDepth: 3 };
+  assert.deepEqual(
+    decideTurnReview({ header: rootHeader, event: completed(), tracked, maxChain: 3 }),
+    { review: false, skip: 'chain-limit', chainDepth: 4 },
+  );
+  // maxChain 缺省 = 3（老规则迁移后的默认值）
+  assert.equal(decideTurnReview({ header: rootHeader, event: completed(), tracked }).review, false);
+  // 0 = 不限，但仍有硬上限兜底
+  assert.equal(decideTurnReview({ header: rootHeader, event: completed(), tracked, maxChain: 0 }).review, true);
+  assert.equal(
+    decideTurnReview({ header: rootHeader, event: completed(), tracked: { injected: true, chainDepth: 999 }, maxChain: 0 }).review,
+    false,
+  );
+});
+
+test('a human turn resets the budget no matter how deep the previous chain was', () => {
+  assert.deepEqual(
+    decideTurnReview({ header: rootHeader, event: completed(), tracked: { injected: false, chainDepth: 9 }, maxChain: 3 }),
+    { review: true, chainDepth: 0 },
+  );
+});
+
+test('maxChain normalization clamps bad input and keeps 0 as unlimited', () => {
+  assert.equal(normalizeMaxChain(undefined), 3);
+  assert.equal(normalizeMaxChain(-2), 3);
+  assert.equal(normalizeMaxChain('abc'), 3);
+  assert.equal(normalizeMaxChain(0), 0);
+  assert.equal(normalizeMaxChain('5'), 5);
+  assert.equal(normalizeMaxChain(9999), 50);
+  assert.equal(exceedsChainLimit(3, 3), false);
+  assert.equal(exceedsChainLimit(4, 3), true);
+  assert.equal(exceedsChainLimit(50, 0), false, '0 = unlimited 但软上限仍是 MAX_CHAIN_CAP=50');
+  assert.equal(exceedsChainLimit(51, 0), true);
+  assert.equal(exceedsChainLimit(999, 0), true);
 });
 
 test('fallback scan result is used only when incremental state is missing', () => {
-  assert.equal(decideTurnReview({ header: rootHeader, event: completed(), fallbackInjected: true }).review, false);
+  // 兜底重建出「本轮是注入唤醒的」时，同样走链上限（而不是无条件跳过）
+  assert.deepEqual(
+    decideTurnReview({ header: rootHeader, event: completed(), fallbackInjected: true, maxChain: 3 }),
+    { review: true, chainDepth: 1 },
+  );
+  assert.equal(decideTurnReview({ header: rootHeader, event: completed(), fallbackInjected: true }).review, true);
   // 增量状态存在且未注入时，以增量为准（兜底结果不覆盖）
   assert.equal(
     decideTurnReview({ header: rootHeader, event: completed(), tracked: { turn: 3, injected: false }, fallbackInjected: true }).review,

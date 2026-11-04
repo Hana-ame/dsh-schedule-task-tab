@@ -22,13 +22,23 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.3.0';
+export const version = '3.4.0';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
 const STORAGE_VERSION = 3;
 const TRIGGER_TURN_END = 'turn-end';
 const MAX_INJECT_PREFIX = 120;
+/**
+ * 默认最多连续审阅多少轮「由本插件注入唤醒的轮次」。
+ *
+ * 旧行为（≤3.3.1）是直接跳过注入轮，于是每收到一条人类消息最多注入一次：
+ * 审阅 → 注入 → 主 agent 干活 → 这一轮结束 → 跳过审阅 → 链断。用户看到的
+ * 就是「只审阅一次」。默认改为 3：允许注入后继续审阅其工作结果（含再注入），
+ * 同时用上限兜住自唤醒死循环。0 = 不限制（不推荐），硬上限 MAX_CHAIN_CAP。
+ */
+const DEFAULT_MAX_CHAIN = 3;
+const MAX_CHAIN_CAP = 50;
 const MAX_KEPT_RUNS = 200;
 /** 注入消息的固定前缀：用于识别“这一轮是注入唤醒的”，避免审阅无限自触发。 */
 const INJECT_PREFIX = '[注入·';
@@ -40,7 +50,17 @@ const FALLBACK_SCAN_EVENTS = 60;
 
 /* ── Storage ─────────────────────────────────────────────────────────── */
 
+/**
+ * 存储路径：**必须跨插件重载稳定**。
+ *
+ * 旧实现用 `ctx.get('hmr').baseDir`：那是 HMR 的「模块监听根」，会随重载/配置变化
+ * （本机现场：live 重载后它从 $DSH_HOME 变成了 profile 目录，插件随即去读一个 10 月
+ * 遗留的空 v1 文件，面板上的规则全部“消失”）。所以改为优先用 DSH 官方的 $DSH_HOME；
+ * 没有该环境变量时（单测 fake ctx、或其它部署）才退回 hmr.baseDir。
+ */
 function storageFile(ctx) {
+  const fromEnv = process.env.DSH_HOME;
+  if (fromEnv) return path.join(fromEnv, 'storages', 'inject-manager.json');
   const hmr = ctx.get('hmr');
   const base = hmr?.baseDir ?? path.join(os.homedir(), '.dsh');
   return path.join(base, 'storages', 'inject-manager.json');
@@ -57,6 +77,8 @@ function migrateTask(task) {
   delete next.nextRunAt;
   delete next.useMemo;
   next.trigger = TRIGGER_TURN_END;
+  // v3.4：老规则没有链上限字段 → 补默认值（注入轮也审阅，但不会无限自唤醒）。
+  next.maxChain = normalizeMaxChain(next.maxChain);
   return next;
 }
 
@@ -159,6 +181,20 @@ function recentMessages(events, maxMessages, maxChars) {
   return { text: joined, messageCount: used };
 }
 
+/** 把规则的「审阅链上限」归一化成合法值：缺省 DEFAULT_MAX_CHAIN，0 = 不限，硬上限 MAX_CHAIN_CAP。 */
+export function normalizeMaxChain(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_MAX_CHAIN;
+  const whole = Math.trunc(n);
+  return whole === 0 ? 0 : Math.min(whole, MAX_CHAIN_CAP);
+}
+
+/** 注入链是否已超过该规则的上限：0 表示不限（只受硬上限约束）。 */
+export function exceedsChainLimit(chainDepth, maxChain) {
+  const limit = normalizeMaxChain(maxChain) || MAX_CHAIN_CAP;
+  return chainDepth > limit;
+}
+
 /** 占位符替换：{sessionId} {taskName} {turn} {reason}。 */
 function fillPlaceholders(template, task, trigger) {
   return String(template ?? '')
@@ -174,6 +210,9 @@ function fillPlaceholders(template, task, trigger) {
  */
 export function defaultReviewPrompt(task, trigger) {
   const turn = trigger?.turn === undefined ? '刚才结束的这一轮' : `第 ${trigger.turn} 轮`;
+  const injectedLine = trigger?.injectedTurn
+    ? `注意：这一轮是**本插件上一轮注入唤醒的**（连续第 ${Number(trigger.chainDepth) || 1} 轮注入链）。所以本轮结束时要审阅的是「主 agent 收到注入后的实际工作结果」：它有没有真的推进、有没有敷衍/假装完成、有没有引入新问题。`
+    : '';
   return [
     '你是会话审阅子代理。主会话的对话刚刚结束一轮，请审阅对话内容，判断是否需要向主会话注入一条后续提示。',
     '',
@@ -181,10 +220,12 @@ export function defaultReviewPrompt(task, trigger) {
     `1. 调用 inject_context_read(sessionId="${task.sessionId}", maxMessages=20) 读取主会话最近的对话内容（用户要求、主 agent 的回复、关键工具结果）。`,
     '2. 判断是否存在值得让主 agent 继续推进的实质信息：未完成的待办、被忽略的用户要求、需要拍板的选择、明显的错误或风险、可以立刻执行的下一步。',
     '3. 若需要注入：调用 inject_deliver 提交内容，精炼、具体、可执行，直接说明要推进的目标与动作；若没有实质信息：不要调用 inject_deliver（本轮就不注入）。',
+    '4. 独立验证，不要只信主 agent 的自我汇报：它说「已完成/已上线/测试通过」时，看工具结果与文件/命令输出，别被口头的状态形容词骗过去。',
     '',
     `本轮结束信息：${turn}，结束原因 ${trigger?.reason ?? 'unknown'}。`,
+    injectedLine,
     '不要为了刷存在感而注入；信息不足时宁可不注入。',
-  ].join('\n');
+  ].filter((line) => line !== '').join('\n');
 }
 
 /** 组装本次审阅子代理的完整 prompt：用户自定义优先，只做占位符替换。 */
@@ -209,23 +250,37 @@ export function isSubagentSessionHeader(header) {
 /**
  * 判断一个 turn/end 事件是否应触发审阅（纯函数，便于测试）。
  *
+ * **v3.4：注入唤醒的那一轮也审阅。** 旧实现见 injected-turn 直接跳过，于是每条
+ * 人类消息最多注入一次（审阅 → 注入 → 主 agent 干活 → 该轮结束 → 跳过 → 链断），
+ * 表现为「只审阅一次」。现在改为按「注入链深度」判定：
+ *   - chainDepth = 本轮之前连续由本插件注入唤醒了多少轮（人类消息会清零）；
+ *   - 深度 ≤ maxChain 就照常审阅，注入轮的工作结果因此也能被再审阅、再注入；
+ *   - 超过上限才跳过（skip: 'chain-limit'），既保证「每次都审」，
+ *     又不至于主 agent 永远醒着自问自答。
+ *
  * @param {object} input
  * @param {object} input.header      - session.header
  * @param {object} input.event       - 追加的 turn/end 事件
- * @param {object|undefined} input.tracked - 增量维护的当前 turn 状态 { injected }
+ * @param {object|undefined} input.tracked - 增量维护的当前 turn 状态 { injected, chainDepth }
  * @param {boolean} input.fallbackInjected - 增量状态缺失时，回溯事件得出的“本轮由注入唤醒”结论
- * @returns {{review:boolean, skip?:string}}
+ * @param {number} [input.maxChain]  - 规则配置的链上限（0 = 不限）
+ * @returns {{review:boolean, skip?:string, chainDepth?:number}}
  */
-export function decideTurnReview({ header, event, tracked, fallbackInjected } = {}) {
+export function decideTurnReview({ header, event, tracked, fallbackInjected, maxChain } = {}) {
   if (!event || event.type !== 'turn/end') return { review: false, skip: 'not-turn-end' };
   if (isSubagentSessionHeader(header)) {
     return { review: false, skip: 'subagent-session' };
   }
   const kind = event.data?.reason?.kind;
   if (SYNTHETIC_TURN_END.has(kind)) return { review: false, skip: `synthetic:${kind}` };
-  if (tracked?.injected) return { review: false, skip: 'injected-turn' };
-  if (tracked === undefined && fallbackInjected) return { review: false, skip: 'injected-turn' };
-  return { review: true };
+  const injectedThisTurn = Boolean(tracked?.injected) || (tracked === undefined && Boolean(fallbackInjected));
+  if (!injectedThisTurn) return { review: true, chainDepth: 0 };
+  // 本轮由注入唤醒：按「本轮结束后的链深度」和规则上限比较。
+  const depthAfter = (Number(tracked?.chainDepth) || 0) + 1;
+  if (exceedsChainLimit(depthAfter, maxChain)) {
+    return { review: false, skip: 'chain-limit', chainDepth: depthAfter };
+  }
+  return { review: true, chainDepth: depthAfter };
 }
 
 /* ── Plugin body ─────────────────────────────────────────────────────── */
@@ -246,8 +301,11 @@ export function apply(ctx) {
   /** 进行中的审阅：按目标会话 id 串行（同一会话同时只跑一个审阅）。 */
   const activeRuns = new Map();
 
-  /** 每个会话当前 turn 的增量状态：{ turn, injected }，用于识别注入唤醒的那一轮。 */
+  /** 每个会话当前 turn 的增量状态：{ turn, injected, chainDepth }。 */
   const turnStates = new Map();
+
+  /** 每个会话「已经连续注入了多少轮」；人类消息开启的轮清零。 */
+  const chainDepths = new Map();
 
   /**
    * 同一会话多规则排队：turn/end 时按顺序逐条审阅（避免并发子代理争用 activeRuns），
@@ -306,6 +364,8 @@ export function apply(ctx) {
       reasoningEffort: input.reasoningEffort ? String(input.reasoningEffort) : undefined,
       systemPrompt: String(input.systemPrompt ?? ''),
       templateId: input.templateId ? String(input.templateId) : undefined,
+      // 注入链上限：连续审阅多少轮「注入唤醒的轮」后停下（0 = 不限）。
+      maxChain: normalizeMaxChain(input.maxChain),
       createdAt: nowIso(),
       lastRunAt: undefined,
       runCount: 0,
@@ -325,6 +385,7 @@ export function apply(ctx) {
     if (patch.systemPrompt !== undefined) task.systemPrompt = String(patch.systemPrompt);
     if (patch.enabled !== undefined) task.enabled = !!patch.enabled;
     if (patch.templateId !== undefined) task.templateId = patch.templateId ? String(patch.templateId) : undefined;
+    if (patch.maxChain !== undefined) task.maxChain = normalizeMaxChain(patch.maxChain);
     task.trigger = TRIGGER_TURN_END;
     delete task.everySeconds;
     delete task.nextRunAt;
@@ -461,14 +522,49 @@ export function apply(ctx) {
       startedAt: partial.startedAt ?? nowIso(),
       finishedAt: partial.finishedAt ?? nowIso(),
       status: partial.status ?? 'failed',
+      ...(partial.skip === undefined ? {} : { skip: partial.skip }),
       injected: partial.injected === true,
       error: partial.error,
       injectedBrief: partial.injectedBrief,
       // 审阅子代理会话 id：UI 可跳回去看真实过程（读取/思考/工具调用都在子代理会话里）
       subagentSessionId: partial.subagentSessionId,
+      // v3.4：本轮是否注入唤醒的轮 + 当时的链深度（UI 用于解释「为什么这轮被跳过」）
+      ...(partial.injectedTurn === undefined ? {} : { injectedTurn: partial.injectedTurn }),
+      ...(partial.chainDepth === undefined ? {} : { chainDepth: partial.chainDepth }),
     });
     task.lastRunAt = nowIso();
     task.runCount += 1;
+    persist();
+  }
+
+  /**
+   * 记一条「没有真正启动子代理」的跳过记录。
+   *
+   * 旧实现只在 console 里 warn 一下就没了，于是「规则明明启用、面板却一条记录都没有」
+   * 这种情况无法解释。现在跳过也落一条 status='skipped' 的运行记录（不增加 runCount、
+   * 不更新 lastRunAt，避免影响「上次审阅」语义）。
+   */
+  function recordSkipped(task, trigger, skip, error) {
+    pushRun({
+      id: newId(),
+      taskId: task.id,
+      taskName: task.name,
+      sessionId: task.sessionId,
+      ...(trigger?.targetSessionId === undefined ? {} : { targetSessionId: trigger.targetSessionId }),
+      trigger: TRIGGER_TURN_END,
+      turn: trigger?.turn,
+      reason: trigger?.reason,
+      manual: false,
+      startedAt: nowIso(),
+      finishedAt: nowIso(),
+      status: 'skipped',
+      skip,
+      injected: false,
+      error,
+      injectedBrief: error,
+      ...(trigger?.injectedTurn === undefined ? {} : { injectedTurn: trigger.injectedTurn }),
+      ...(trigger?.chainDepth === undefined ? {} : { chainDepth: trigger.chainDepth }),
+    });
     persist();
   }
 
@@ -506,9 +602,15 @@ export function apply(ctx) {
     // 规则绑定在血缘根（task.sessionId），但上下文读取、工具定位与注入都必须面向
     // “结束这一轮的那个会话”：消息编辑/重 roll 的版本分支 ≠ 旧的原会话。
     const sessionId = String(trigger.targetSessionId ?? task.sessionId);
-    const record = (partial) => recordRun(task, { targetSessionId: sessionId, ...partial });
+    const record = (partial) => recordRun(task, {
+      targetSessionId: sessionId,
+      injectedTurn: trigger.injectedTurn,
+      chainDepth: trigger.chainDepth,
+      ...partial,
+    });
     // 同一目标会话同时只跑一个审阅：activeRun 里三个工具按 sessionId 定位运行上下文。
     if (activeRuns.has(sessionId)) {
+      record({ startedAt, turn: trigger.turn, reason: trigger.reason, manual: trigger.manual, status: 'skipped', skip: 'busy', error: '同一会话已有一个审阅在进行中，本轮跳过' });
       return { status: 'skipped', reason: 'busy' };
     }
     const run = { sessionId, taskId: task.id, pendingInjection: undefined, turn: trigger.turn, reason: trigger.reason };
@@ -631,50 +733,74 @@ export function apply(ctx) {
   /* ── 对话结束触发（取代原来的定时器）───────────────────────────── */
 
   /**
-   * 兜底：插件中途重载导致 turnStates 缺失时，回看最近事件判断本轮 user 消息
-   * 是否来自本插件的注入（避免注入唤醒的下一轮又触发审阅 → 无限自唤醒）。
+   * 兜底：插件中途重载导致 turnStates 缺失时，回看最近事件重建「本轮是否注入唤醒」
+   * 与「已经连续注入了多少轮」（链深度）。
+   *
+   * 返回 chainDepth = 含本轮在内、从本轮往回连续注入唤醒的轮数。非注入轮为 0。
    */
-  function fallbackTurnInjected(session, turn) {
+  function fallbackTurnChain(session, turn) {
     try {
-      if (!session || typeof session.snapshotEvents !== 'function') return false;
+      if (!session || typeof session.snapshotEvents !== 'function') return { injected: false, chainDepth: 0 };
       const from = Math.max(0, (session.seq ?? 0) - FALLBACK_SCAN_EVENTS);
       const events = session.snapshotEvents(from);
-      let start = -1;
-      for (let i = events.length - 1; i >= 0; i -= 1) {
-        if (events[i]?.type === 'turn/start' && events[i]?.data?.turn === turn) { start = i; break; }
+      const turns = [];
+      let current;
+      for (const event of events) {
+        if (event?.type === 'turn/start') {
+          current = { turn: event.data?.turn, injected: false };
+          turns.push(current);
+        } else if (event?.type === 'user/message' && current) {
+          if (isInjectedText(contentText(event.data?.content))) current.injected = true;
+        }
       }
-      if (start < 0) return false;
-      return events.slice(start + 1).some((event) => (
-        event?.type === 'user/message' && isInjectedText(contentText(event?.data?.content))
-      ));
+      const index = turns.findIndex((item) => item.turn === turn);
+      if (index < 0) return { injected: false, chainDepth: 0 };
+      if (!turns[index].injected) return { injected: false, chainDepth: 0 };
+      let depth = 0;
+      for (let i = index; i >= 0; i -= 1) {
+        if (!turns[i].injected) break;
+        depth += 1;
+      }
+      return { injected: true, chainDepth: depth };
     } catch {
-      return false;
+      return { injected: false, chainDepth: 0 };
     }
   }
 
-  /** 维护每个会话当前 turn 的增量状态，供 turn/end 判断。 */
+  /**
+   * 维护每个会话当前 turn 的增量状态，供 turn/end 判断。
+   *
+   * chainDepth = 本轮开始前已经连续注入唤醒的轮数（turn/end 时据此 +1 判定上限）。
+   */
   function trackTurnEvent(session, event) {
     const id = String(session?.id ?? '');
     if (!id || !event) return;
     if (event.type === 'turn/start') {
-      turnStates.set(id, { turn: event.data?.turn, injected: false });
+      const previous = chainDepths.get(id) ?? 0;
+      turnStates.set(id, { turn: event.data?.turn, injected: false, chainDepth: previous });
       return;
     }
     if (event.type === 'user/message') {
       if (!isInjectedText(contentText(event.data?.content))) return;
-      const tracked = turnStates.get(id) ?? { turn: undefined, injected: false };
+      const tracked = turnStates.get(id) ?? { turn: undefined, injected: false, chainDepth: chainDepths.get(id) ?? 0 };
       tracked.injected = true;
       turnStates.set(id, tracked);
     }
   }
 
-  /** 把一条规则的审阅排进该会话的串行队列；同规则重复或队列满则跳过。 */
+  /**
+   * 把一条规则的审阅排进该会话的串行队列；同规则重复或队列满则跳过（并留痕）。
+   */
   function scheduleReview(task, trigger) {
     const sessionId = task.sessionId;
     const queue = reviewQueues.get(sessionId) ?? { tail: Promise.resolve(), queued: 0 };
-    if (queuedTasks.has(task.id)) return { queued: false, reason: 'duplicate' };
+    if (queuedTasks.has(task.id)) {
+      recordSkipped(task, trigger, 'duplicate', '同一规则的上一轮审阅还没结束，本轮不重复入队');
+      return { queued: false, reason: 'duplicate' };
+    }
     if (queue.queued >= MAX_QUEUED_REVIEWS) {
       console.warn(`[inject-manager] review queue full, skip rule ${task.id} for session ${sessionId}`);
+      recordSkipped(task, trigger, 'queue-full', `同一会话积压了 ${MAX_QUEUED_REVIEWS} 条待审阅，本轮跳过`);
       return { queued: false, reason: 'full' };
     }
     queue.queued += 1;
@@ -703,6 +829,9 @@ export function apply(ctx) {
    * 规则绑在血缘根（消息编辑/重 roll 前后同一套规则）；触发则看整个对话树：
    * 版本分支的 turn/end 也要命中根上的规则，但 `targetSessionId` 记录本轮真正
    * 活跃的会话，注入只发给它，绝不发给旧版本分支。
+   *
+   * v3.4：注入唤醒的轮也参与审阅（受每条规则的 chainDepth 上限约束），
+   * 因此「审阅 → 注入 → 主 agent 干活 → 再审阅」可以连续推进，而不是只审一次。
    */
   async function onTurnEnd(session, event) {
     if (!sessionController || !subagents || !tools) return; // 服务尚未就绪
@@ -710,14 +839,28 @@ export function apply(ctx) {
     if (!sessionId) return;
     const tracked = turnStates.get(sessionId);
     turnStates.delete(sessionId);
+    const fallback = tracked === undefined ? fallbackTurnChain(session, event?.data?.turn) : undefined;
+    // chainBefore = 本轮开始前已连续注入的轮数；injectedDepth = 本轮在链里的位置（1-based）。
+    const chainBefore = tracked ? (Number(tracked.chainDepth) || 0) : (Number(fallback?.chainDepth) || 0);
+    const injected = tracked ? Boolean(tracked.injected) : Boolean(fallback?.injected);
+    const injectedDepth = injected ? chainBefore + 1 : 0;
+    // 记下「到本轮为止」的链深度，供下一轮 turn/start 继承；人类轮清零重新拿满额度。
+    if (injected) chainDepths.set(sessionId, injectedDepth);
+    else chainDepths.delete(sessionId);
 
-    const decision = decideTurnReview({
+    // 结构性问题（非 turn/end、子代理会话、合成事件）先便宜地挡掉，不解析血缘。
+    const structural = decideTurnReview({
       header: session.header,
       event,
-      tracked,
-      fallbackInjected: tracked === undefined ? fallbackTurnInjected(session, event?.data?.turn) : false,
+      tracked: { injected, chainDepth: chainBefore },
+      maxChain: 0, // 0 = 不限，仅用于判断结构性条件
     });
-    if (!decision.review) return;
+    if (!structural.review) {
+      if (structural.skip && !String(structural.skip).startsWith('synthetic:') && structural.skip !== 'not-turn-end') {
+        console.log(`[inject-manager] skip review: session=${sessionId} turn=${event?.data?.turn} reason=${structural.skip}`);
+      }
+      return;
+    }
 
     // 没有任何启用规则时不做血缘解析（inspect 链是异步调用，避免每轮白跑）。
     const enabled = Object.values(state.tasks).filter((task) => task.enabled);
@@ -729,9 +872,29 @@ export function apply(ctx) {
       turn: event.data?.turn,
       reason: event.data?.reason?.kind ?? 'unknown',
       targetSessionId: sessionId,
+      injectedTurn: injected,
+      chainDepth: injectedDepth,
     };
-    console.log(`[inject-manager] turn ended → review: session=${sessionId} root=${root} turn=${trigger.turn} rules=${tasks.length}`);
-    for (const task of tasks) scheduleReview(task, trigger);
+
+    const scheduled = [];
+    for (const task of tasks) {
+      // 每条规则有自己的链上限，所以逐条判定（纯函数，开销可忽略）。
+      const decision = decideTurnReview({
+        header: session.header,
+        event,
+        tracked: { injected, chainDepth: chainBefore },
+        maxChain: task.maxChain,
+      });
+      if (decision.review) {
+        scheduled.push(task);
+      } else if (decision.skip === 'chain-limit') {
+        recordSkipped(task, { ...trigger, chainDepth: decision.chainDepth ?? injectedDepth }, 'chain-limit',
+          `已连续审阅 ${decision.chainDepth ?? injectedDepth} 轮注入唤醒的对话，达到规则上限（${normalizeMaxChain(task.maxChain) || '∞'}），本轮不再审阅`);
+      }
+    }
+    if (scheduled.length === 0) return;
+    console.log(`[inject-manager] turn ended → review: session=${sessionId} root=${root} turn=${trigger.turn} rules=${scheduled.length}${injected ? ` chain=${injectedDepth}` : ''}`);
+    for (const task of scheduled) scheduleReview(task, trigger);
   }
 
   /** session/event 观察者：先把本轮状态喂给跟踪器，再在 turn/end 上判断是否审阅。 */
@@ -779,7 +942,17 @@ export function apply(ctx) {
         return resolveRootSession(String(args.sessionId ?? '')).then((root) =>
           ok(Object.values(state.tasks).filter((t) => t.sessionId === root).sort((a, b) => a.createdAt.localeCompare(b.createdAt))));
       case 'tasks/create':
-        return createTask(args).then((task) => ok(task));
+        // reviewNow：建完立刻补审一次当前会话。用于「规则建好之前已经发生的对话」，
+        // 否则用户要等到下一条人类消息才会有第一次审阅。
+        return createTask(args).then(async (task) => {
+          if (args.reviewNow !== true) return ok(task);
+          const run = await triggerTask(task, {
+            reason: 'created',
+            manual: false,
+            targetSessionId: task.sessionId,
+          });
+          return ok({ ...task, reviewNow: run });
+        });
       case 'tasks/update':
         return ok(updateTask(String(args.id), args.patch ?? {}));
       case 'tasks/delete':
@@ -813,8 +986,13 @@ export function apply(ctx) {
         return ok(deleteTemplate(String(args.id)));
       case 'runs/list': {
         const limit = Math.min(100, Number(args.limit) || 30);
-        return resolveRootSession(String(args.sessionId ?? '')).then((root) => {
-          const rows = root ? state.runs.filter((r) => r.sessionId === root) : state.runs;
+        const asked = String(args.sessionId ?? '');
+        return resolveRootSession(asked).then((root) => {
+          // 规则绑血缘根（run.sessionId），但真正被审阅的可能是版本分支（run.targetSessionId）；
+          // 两个方向都算命中，否则在版本分支里看不到自己的审阅记录。
+          const rows = root
+            ? state.runs.filter((r) => r.sessionId === root || (asked && r.targetSessionId === asked))
+            : state.runs;
           return ok(rows.slice(0, limit));
         });
       }
