@@ -272,7 +272,7 @@ export function normalizeMaxChain(value) {
   return Math.trunc(n);
 }
 
-/** 注入链是否已超过该规则的上限：0 表示不限（只受硬上限约束）。 */
+/** 注入链是否已超过该规则的上限：0 = 不限（无任何硬顶），> 0 = 显式保险丝。 */
 export function exceedsChainLimit(chainDepth, maxChain) {
   const limit = normalizeMaxChain(maxChain);
   if (limit === 0) return false; // 0 = 不限：无限 loop，直到审阅自己判断无需注入
