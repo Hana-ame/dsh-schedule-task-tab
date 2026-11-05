@@ -110,7 +110,7 @@ window.__ModuleLoader__.load({
       'run.status.failed': '失败',
       'task.chain': '注入链上限',
       'task.chain.unit': '轮',
-      'task.chain.hint': '注入唤醒的下一轮也继续审阅，直到连续注入达到这个轮数才停。填 0 = 不限制（最多 50）。默认 3：既保证每轮都审，又不会让主 agent 自问自答到停不下来。',
+      'task.chain.hint': '注入唤醒的下一轮也继续审阅。填 0 = 不限（默认）：无限 loop，链的唯一出口是审阅子代理判断无需注入。想加保险丝就填正整数：连续注入达到该轮数后本轮停止审阅。',
       'created.reviewed.injected': '规则已创建，并已立即审阅当前对话（本次有提醒注入）',
       'created.reviewed.skipped': '规则已创建，并已立即审阅当前对话（本次判断无需提醒）',
       'run.status.notRun': '未执行',
@@ -221,7 +221,7 @@ window.__ModuleLoader__.load({
       'run.status.failed': 'Failed',
       'task.chain': 'Injection chain limit',
       'task.chain.unit': 'turns',
-      'task.chain.hint': 'Turns woken by our own injection keep getting reviewed until the chain reaches this many consecutive injections. 0 = unlimited (capped at 50). Default 3: every turn gets reviewed, without letting the main agent talk to itself forever.',
+      'task.chain.hint': 'Turns woken by our own injection keep getting reviewed. 0 = unlimited (default): the only exit is the reviewer deciding nothing needs injecting. Set a positive number as a fuse: stop after that many consecutive injections.',
       'created.reviewed.injected': 'Rule created and the current conversation was reviewed right away (this round it was nudged)',
       'created.reviewed.skipped': 'Rule created and the current conversation was reviewed right away (nothing to nudge this round)',
       'run.status.notRun': 'Not run',
@@ -651,7 +651,7 @@ window.__ModuleLoader__.load({
       const [model, setModel] = react.useState(initial?.model ?? '');
       const [reasoningEffort, setReasoningEffort] = react.useState(initial?.reasoningEffort ?? '');
       const [systemPrompt, setSystemPrompt] = react.useState(initial?.systemPrompt ?? '');
-      const [maxChain, setMaxChain] = react.useState(String(initial?.maxChain ?? 3));
+      const [maxChain, setMaxChain] = react.useState(String(initial?.maxChain ?? 0));
       const [enabled, setEnabled] = react.useState(initial?.enabled ?? true);
       const [templateId, setTemplateId] = react.useState('');
       const [showTemplates, setShowTemplates] = react.useState(false);
@@ -800,7 +800,6 @@ window.__ModuleLoader__.load({
                 className: 'inj-input',
                 type: 'number',
                 min: 0,
-                max: 50,
                 step: 1,
                 style: { maxWidth: 110 },
                 value: maxChain,
@@ -986,7 +985,7 @@ window.__ModuleLoader__.load({
         setCreating(true);
         try {
           const created = await hostCall('tasks/create', {
-            sessionId, name: t('quick.name'), systemPrompt: '', maxChain: 3, enabled: true, reviewNow: true,
+            sessionId, name: t('quick.name'), systemPrompt: '', maxChain: 0, enabled: true, reviewNow: true,
           });
           const firstReview = created?.reviewNow;
           flash('ok', firstReview?.status === 'ok'

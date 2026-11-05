@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.5.0';
+export const version = '3.6.0';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
@@ -30,15 +30,14 @@ const STORAGE_VERSION = 3;
 const TRIGGER_TURN_END = 'turn-end';
 const MAX_INJECT_PREFIX = 120;
 /**
- * 默认最多连续审阅多少轮「由本插件注入唤醒的轮次」。
+ * 默认注入链上限：**0 = 不限**（v3.6 起，用户明确要求「必须保证无限 loop」）。
  *
- * 旧行为（≤3.3.1）是直接跳过注入轮，于是每收到一条人类消息最多注入一次：
- * 审阅 → 注入 → 主 agent 干活 → 这一轮结束 → 跳过审阅 → 链断。用户看到的
- * 就是「只审阅一次」。默认改为 3：允许注入后继续审阅其工作结果（含再注入），
- * 同时用上限兜住自唤醒死循环。0 = 不限制（不推荐），硬上限 MAX_CHAIN_CAP。
+ * 演变：≤3.3.1 见注入轮直接跳过（「只审阅一次」）；v3.4 改成链模型但默认上限 3，
+ * 用户实测后否决——链是推进任务的手段，被上限截断等于「审到一半自己停」。
+ * v3.6 起默认无限：链的唯一自然出口是**审阅子代理判断无需注入**（不调
+ * inject_deliver）。仍可按规则显式设 maxChain > 0 来加保险丝。
  */
-const DEFAULT_MAX_CHAIN = 3;
-const MAX_CHAIN_CAP = 50;
+const DEFAULT_MAX_CHAIN = 0;
 const MAX_KEPT_RUNS = 200;
 /** 注入消息的固定前缀：用于识别“这一轮是注入唤醒的”，避免审阅无限自触发。 */
 const INJECT_PREFIX = '[注入·';
@@ -77,8 +76,11 @@ function migrateTask(task) {
   delete next.nextRunAt;
   delete next.useMemo;
   next.trigger = TRIGGER_TURN_END;
-  // v3.4：老规则没有链上限字段 → 补默认值（注入轮也审阅，但不会无限自唤醒）。
-  next.maxChain = normalizeMaxChain(next.maxChain);
+  // v3.6：maxChain 缺省 → 0（无限 loop，用户明确要求）。**显式存过的值不动**——
+  // 用户给某条规则设过保险丝就尊重它；只有「没有这个字段」才补默认。
+  // 注意 v3.4~v3.5 期间 migrateTask 曾把缺省写成 3，无法与用户显式的 3 区分，
+  // 这是当时的失误；v3.6 部署说明里要求把存量 3 一并视为「未显式设置」重置为 0。
+  if (next.maxChain === undefined) next.maxChain = DEFAULT_MAX_CHAIN;
   return next;
 }
 
@@ -263,17 +265,17 @@ function recentMessages(events, maxMessages, maxChars) {
   return { text: joined, messageCount: used };
 }
 
-/** 把规则的「审阅链上限」归一化成合法值：缺省 DEFAULT_MAX_CHAIN，0 = 不限，硬上限 MAX_CHAIN_CAP。 */
+/** 把规则的「审阅链上限」归一化成合法值：缺省 DEFAULT_MAX_CHAIN（=0 不限）。 */
 export function normalizeMaxChain(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n < 0) return DEFAULT_MAX_CHAIN;
-  const whole = Math.trunc(n);
-  return whole === 0 ? 0 : Math.min(whole, MAX_CHAIN_CAP);
+  return Math.trunc(n);
 }
 
 /** 注入链是否已超过该规则的上限：0 表示不限（只受硬上限约束）。 */
 export function exceedsChainLimit(chainDepth, maxChain) {
-  const limit = normalizeMaxChain(maxChain) || MAX_CHAIN_CAP;
+  const limit = normalizeMaxChain(maxChain);
+  if (limit === 0) return false; // 0 = 不限：无限 loop，直到审阅自己判断无需注入
   return chainDepth > limit;
 }
 
@@ -337,9 +339,9 @@ export function isSubagentSessionHeader(header) {
  * 人类消息最多注入一次（审阅 → 注入 → 主 agent 干活 → 该轮结束 → 跳过 → 链断），
  * 表现为「只审阅一次」。现在改为按「注入链深度」判定：
  *   - chainDepth = 本轮之前连续由本插件注入唤醒了多少轮（人类消息会清零）；
- *   - 深度 ≤ maxChain 就照常审阅，注入轮的工作结果因此也能被再审阅、再注入；
- *   - 超过上限才跳过（skip: 'chain-limit'），既保证「每次都审」，
- *     又不至于主 agent 永远醒着自问自答。
+ *   - maxChain = 0（缺省，v3.6 起）＝ 不限：注入轮永远审下去（无限 loop），
+ *     唯一的自然出口是审阅子代理判断无需注入（不调用 inject_deliver）；
+ *   - 显式设 maxChain > 0 才有保险丝：超过上限跳过（skip: 'chain-limit'）。
  *
  * @param {object} input
  * @param {object} input.header      - session.header

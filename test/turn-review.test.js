@@ -84,19 +84,21 @@ test('an injected turn IS reviewed while the chain budget lasts (v3.4 fix)', () 
   );
 });
 
-test('the injected-turn chain stops at the rule limit instead of looping forever', () => {
+test('the injected-turn chain stops only at an EXPLICIT rule limit (v3.6)', () => {
   const tracked = { turn: 9, injected: true, chainDepth: 3 };
   assert.deepEqual(
     decideTurnReview({ header: rootHeader, event: completed(), tracked, maxChain: 3 }),
     { review: false, skip: 'chain-limit', chainDepth: 4 },
   );
-  // maxChain 缺省 = 3（老规则迁移后的默认值）
-  assert.equal(decideTurnReview({ header: rootHeader, event: completed(), tracked }).review, false);
-  // 0 = 不限，但仍有硬上限兜底
-  assert.equal(decideTurnReview({ header: rootHeader, event: completed(), tracked, maxChain: 0 }).review, true);
-  assert.equal(
-    decideTurnReview({ header: rootHeader, event: completed(), tracked: { injected: true, chainDepth: 999 }, maxChain: 0 }).review,
-    false,
+  // v3.6：maxChain 缺省 = 0 = 无限 loop，深链继续审
+  assert.deepEqual(
+    decideTurnReview({ header: rootHeader, event: completed(), tracked }),
+    { review: true, chainDepth: 4 },
+  );
+  // 链再深也不拦
+  assert.deepEqual(
+    decideTurnReview({ header: rootHeader, event: completed(), tracked: { injected: true, chainDepth: 999 } }),
+    { review: true, chainDepth: 1000 },
   );
 });
 
@@ -107,18 +109,20 @@ test('a human turn resets the budget no matter how deep the previous chain was',
   );
 });
 
-test('maxChain normalization clamps bad input and keeps 0 as unlimited', () => {
-  assert.equal(normalizeMaxChain(undefined), 3);
-  assert.equal(normalizeMaxChain(-2), 3);
-  assert.equal(normalizeMaxChain('abc'), 3);
+test('maxChain normalization: default is UNLIMITED (v3.6), explicit fuse still works', () => {
+  // v3.6：用户明确要求「必须保证无限 loop」→ 缺省 0 = 不限
+  assert.equal(normalizeMaxChain(undefined), 0);
+  assert.equal(normalizeMaxChain(-2), 0);
+  assert.equal(normalizeMaxChain('abc'), 0);
   assert.equal(normalizeMaxChain(0), 0);
   assert.equal(normalizeMaxChain('5'), 5);
-  assert.equal(normalizeMaxChain(9999), 50);
+  assert.equal(normalizeMaxChain(9999), 9999, '不再有 50 的硬夹取');
+  // 0 = 真无限：无论链多深都不拦
+  assert.equal(exceedsChainLimit(999, 0), false);
+  assert.equal(exceedsChainLimit(999999, 0), false);
+  // 显式保险丝仍然有效
   assert.equal(exceedsChainLimit(3, 3), false);
   assert.equal(exceedsChainLimit(4, 3), true);
-  assert.equal(exceedsChainLimit(50, 0), false, '0 = unlimited 但软上限仍是 MAX_CHAIN_CAP=50');
-  assert.equal(exceedsChainLimit(51, 0), true);
-  assert.equal(exceedsChainLimit(999, 0), true);
 });
 
 test('fallback scan result is used only when incremental state is missing', () => {

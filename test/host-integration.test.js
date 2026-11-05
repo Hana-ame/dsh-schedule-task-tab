@@ -322,6 +322,28 @@ test('injected turns keep being reviewed until the rule chain budget stops the l
   await waitFor(() => readState(harness.stateFile).runs.some((run) => run.turn === 5 && run.status === 'ok'));
 });
 
+test('v3.6 default is UNLIMITED: injected turns keep being reviewed with no rule maxChain', async () => {
+  // 用户明确要求「必须保证无限 loop」：不显式设 maxChain 的规则，注入链永不因
+  // 深度被拦——唯一出口是审阅子代理自己判断无需注入。
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask({ systemPrompt: '不要注入。' }) },
+    subagentScript: async () => {},
+  });
+  // 连续 6 个注入轮：全都要留下 ok 的审阅记录，且没有任何 chain-limit skip。
+  // 逐轮 await：串行队列里同一规则并发入队会被去重（duplicate），那是排队保护
+  // 不是链上限——一次一条按序触发即可验证「深度不设限」。
+  for (let turn = 1; turn <= 6; turn += 1) {
+    harness.turnEnd(harness.rootSession, { turn, injected: true });
+    await waitFor(() => readState(harness.stateFile).runs.some((run) => run.turn === turn && run.status === 'ok'), 5000);
+  }
+  await waitFor(() => readState(harness.stateFile).runs.filter((run) => run.status === 'ok').length === 6, 5000);
+  const state = readState(harness.stateFile);
+  assert.equal(state.runs.filter((run) => run.skip === 'chain-limit').length, 0, 'no chain-limit skip may appear without an explicit maxChain');
+  const depths = state.runs.filter((run) => run.status === 'ok').map((run) => run.chainDepth).sort((a, b) => a - b);
+  assert.deepEqual(depths, [1, 2, 3, 4, 5, 6], 'chain depth must keep counting with no cap');
+});
+
 test('a new human turn resets the injected-turn chain budget', async () => {
   const harness = createHarness({
     baseDir: makeTempDir(),
