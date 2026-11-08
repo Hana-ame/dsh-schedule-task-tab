@@ -2,22 +2,28 @@
 
 DSH Web 插件：**每次主会话一轮对话结束后，自动启动子代理审阅对话内容，判断是否需要注入主会话唤醒主 agent。**
 
-> **v3.6.1：审阅子代理工具白名单可配置**
+> **v3.6.4：审阅子代理工具白名单可配置（全局 + 规则级）**
 >
-> 默认审阅子代理只允许 `inject_context_read` / `inject_user_inputs` / `inject_deliver`（child-scope guard +
-> `toolFilter` 双重限制）。如需放行额外工具（例如让审阅子代理自己创建子智能体 `subagent`），
-> 在 profile patch 的插件配置里加 `reviewExtraTools` 数组即可，同一白名单同时作用于两处限制：
+> 默认审阅子代理只允许 `inject_context_read` / `inject_user_inputs` / `inject_deliver`。
+> 放行额外工具（例如让审阅子代理自己创建子智能体 `subagent`）有**两层**配置，叠加生效：
 >
-> ```yaml
-> - insert:
->     - id: schedule-task-tab-v361
->       name: 'file:///home/lumin/.dsh/plugins/dsh-schedule-task-tab/index.js?rev=3.6.1'
->       config:
->         reviewExtraTools:
->           - subagent
-> ```
+> 1. **全局**（profile patch 的插件配置 `reviewExtraTools`，对所有规则生效）：
+>    ```yaml
+>    - insert:
+>        - id: schedule-task-tab-v364
+>          name: 'file:///home/lumin/.dsh/plugins/dsh-schedule-task-tab/index.js?rev=3.6.4'
+>          config:
+>            reviewExtraTools:
+>              - subagent
+>    ```
+> 2. **规则级**（UI 新建/编辑规则表单里的「额外放行的工具」字段，逗号分隔工具名，只对该规则生效）。
 >
-> 不配置时行为与旧版完全一致（只有三个注入工具）。`reviewExtraTools` 只做追加与去重，
+> **实现分工（DSH 实测约束）**：`toolFilter` 底层 `tools.restrict()` 只接受 **global tools**，
+> scoped 工具（如 preset 带入的 `subagent` / `list_agents`）塞进去会直接抛
+> `unknown global tools`；所以 toolFilter 只放行基础 inject_* 三件，额外工具（含 scoped）
+> 走 **child-scope guard** 放行（`tools.guard` 对 global 与 scoped 统一生效）。
+>
+> 不配置时行为与旧版完全一致（只有三个注入工具）。白名单只做追加与去重，
 > 非法值（非字符串/空串）静默忽略；基础三个工具不可移除。
 
 > **v3.5：读取所有 user input**

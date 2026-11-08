@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.6.1';
+export const version = '3.6.4';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
@@ -391,10 +391,10 @@ export function decideTurnReview({ header, event, tracked, fallbackInjected, max
 
 export function apply(ctx, config = {}) {
   /**
-   * 本实例生效的审阅子代理工具白名单 = 基础三件 + 用户配置的额外工具。
-   * 同时约束 child-scope guard 与 subagents.start 的 toolFilter。
+   * 全局（插件级）审阅子代理额外工具白名单：来自 config.reviewExtraTools。
+   * 每次触发时还要叠加上「基础三件 + 本规则 task.extraTools」才是最终 allow。
    */
-  const reviewTools = [...SUBAGENT_BASE_TOOLS, ...normalizeExtraTools(config.reviewExtraTools)];
+  const reviewExtra = normalizeExtraTools(config.reviewExtraTools);
   const file = storageFile(ctx);
   let state = readState(file);
   const persist = () => { try { writeState(state, file); } catch { /* best effort */ } };
@@ -475,6 +475,8 @@ export function apply(ctx, config = {}) {
       templateId: input.templateId ? String(input.templateId) : undefined,
       // 注入链上限：连续审阅多少轮「注入唤醒的轮」后停下（0 = 不限）。
       maxChain: normalizeMaxChain(input.maxChain),
+      // 规则级额外放行的审阅子代理工具（如 subagent）；缺省 undefined = 只用全局配置。
+      extraTools: normalizeExtraTools(input.extraTools),
       createdAt: nowIso(),
       lastRunAt: undefined,
       runCount: 0,
@@ -495,6 +497,7 @@ export function apply(ctx, config = {}) {
     if (patch.enabled !== undefined) task.enabled = !!patch.enabled;
     if (patch.templateId !== undefined) task.templateId = patch.templateId ? String(patch.templateId) : undefined;
     if (patch.maxChain !== undefined) task.maxChain = normalizeMaxChain(patch.maxChain);
+    if (patch.extraTools !== undefined) task.extraTools = normalizeExtraTools(patch.extraTools);
     task.trigger = TRIGGER_TURN_END;
     delete task.everySeconds;
     delete task.nextRunAt;
@@ -711,29 +714,35 @@ export function apply(ctx, config = {}) {
   }
 
   /**
-   * 审阅子代理只允许调用 reviewTools（基础三件 + config.reviewExtraTools）。
+   * 审阅子代理只允许调用 allow 里的工具（基础三件 + 全局 + 规则级）。
    * toolFilter 只能遮住 global 工具，agent preset 带下来的 scoped 工具
    * （list_agents / subagent / ...）不受它约束；这里在 child agent 的 scope 上
    * 补一道 guard（tools.guard 注册在 agent.ctx 时只作用于该 agent），
    * 越权调用会被拒绝并给出原因。
    *
    * @param childId - 刚启动的审阅子代理 session id
+   * @param allow - 本次触发的完整工具白名单（与 toolFilter 相同）
    * @returns 解除 guard 的 disposer；拿不到 child/guard 时返回空 disposer
    */
-  function guardReviewChild(childId) {
+  function guardReviewChild(childId, allow) {
+    const allowed = Array.isArray(allow) ? allow : reviewToolsFallback();
     try {
       const child = agents?.get?.(String(childId ?? ''));
       const childTools = child?.ctx?.get?.('tools') ?? child?.ctx?.tools;
       if (!childTools || typeof childTools.guard !== 'function') return () => {};
       return childTools.guard((exec) => {
         const called = String(exec?.name ?? 'unknown');
-        return reviewTools.includes(called)
+        return allowed.includes(called)
           ? undefined
-          : `审阅子代理只允许调用 ${reviewTools.join(' / ')}，禁止调用 ${called}`;
+          : `审阅子代理只允许调用 ${allowed.join(' / ')}，禁止调用 ${called}`;
       });
     } catch {
       return () => {};
     }
+  }
+  /** guard 未显式传 allow 时的回退：基础三件 + 全局额外（规则级缺省不会出现在这里）。 */
+  function reviewToolsFallback() {
+    return [...SUBAGENT_BASE_TOOLS, ...reviewExtra];
   }
 
   /**
@@ -781,9 +790,15 @@ export function apply(ctx, config = {}) {
       //    用目标会话 id 替换占位符，否则子代理会去读血缘根（旧版本）的上下文。
       const prompt = buildReviewPrompt({ ...task, sessionId }, trigger);
 
-      // 4. 启动子代理（只给读上下文与提交注入两个工具）。
+      // 4. 启动子代理（只给读上下文与提交注入两个 global 工具）。
       // 固定用 spawn（fresh 上下文）：fork 会把主会话全量日志 seed 进子会话，成本和行为都会漂移；
       // 也不能用 providers[0]——provider 注册顺序可能变化。缺 spawn 时本轮判失败，不静默换 provider。
+      // 分工（DSH 实测约束）：
+      //  - toolFilter 底层 tools.restrict() 只接受 global tools，塞 scoped 工具（如 subagent）
+      //    会直接抛 "unknown global tools" —— 所以 toolFilter 只放行基础 inject_* 三件；
+      //  - scoped 额外工具（全局 config.reviewExtraTools + 规则级 task.extraTools）靠
+      //    child-scope guard 放行，guard 与 toolFilter 各司其职、不共用同一份 allow。
+      const taskTools = [...SUBAGENT_BASE_TOOLS, ...reviewExtra, ...normalizeExtraTools(task.extraTools)];
       const providers = (await subagents.list()) ?? [];
       if (!providers.includes('spawn')) {
         record({
@@ -808,11 +823,13 @@ export function apply(ctx, config = {}) {
               ...(task.reasoningEffort ? { reasoningEffort: task.reasoningEffort } : {}),
             } }
           : {}),
-        toolFilter: { allow: reviewTools },
+        // toolFilter 只放行 global 工具：基础三件。scoped 额外工具不进这里（restrict 会拒绝未知名）。
+        toolFilter: { allow: [...SUBAGENT_BASE_TOOLS] },
       });
       const subagentId = started.id; // 子代理会话：UI 可跳回去看真实过程
       // toolFilter 之外再补一道 child-scope guard（挡住 preset 带下来的 scoped 工具）。
-      disposeChildGuard = guardReviewChild(subagentId);
+      // guard 的 allow = 基础三件 + 全局额外 + 规则级额外（scoped 工具在这里放行）。
+      disposeChildGuard = guardReviewChild(subagentId, taskTools);
 
       // 5. 等子代理结束：注入内容只来自 inject_deliver 提交，而不是最后一条回复。
       await started.result;

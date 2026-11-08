@@ -541,7 +541,7 @@ test('review subagent gets a child-scope guard for the two injection tools only'
   assert.equal(guard.active, false, 'guard must be released when the review run settles');
 });
 
-test('reviewExtraTools config appends to both the child-scope guard and the toolFilter', async () => {
+test('reviewExtraTools config appends to the child-scope guard (toolFilter stays global-only)', async () => {
   const harness = createHarness({
     baseDir: makeTempDir(),
     tasks: { 'task-1': baseTask() },
@@ -551,16 +551,15 @@ test('reviewExtraTools config appends to both the child-scope guard and the tool
   harness.turnEnd(harness.rootSession);
   await waitFor(() => readState(harness.stateFile).runs.length === 1);
 
-  // toolFilter：spawn 选项里必须带上追加的工具
+  // toolFilter：只放行 global 工具（基础三件），scoped 工具塞进去会 tools.restrict() 抛错
   assert.equal(harness.startCalls.length, 1, 'one review subagent must start');
   assert.deepEqual(harness.startCalls[0].options.toolFilter.allow, [
     'inject_context_read',
     'inject_user_inputs',
     'inject_deliver',
-    'subagent',
   ]);
 
-  // child-scope guard：追加的工具放行，未追加的仍然拒绝
+  // child-scope guard：追加的 scoped 工具放行，未追加的仍然拒绝
   assert.equal(harness.childGuards.length, 1, 'one guard must be armed on the review child');
   const guard = harness.childGuards[0];
   assert.equal(guard.fn({ name: 'subagent' }), undefined, 'subagent must be allowed via reviewExtraTools');
@@ -582,8 +581,69 @@ test('invalid reviewExtraTools values are ignored and base tools stay intact', a
     'inject_context_read',
     'inject_user_inputs',
     'inject_deliver',
-    'subagent',
   ]);
+});
+
+test('rule-level extraTools ride along in the guard allow on top of the global config', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask({ extraTools: ['web_search'] }) },
+    subagentScript: async () => {},
+    pluginConfig: { reviewExtraTools: ['subagent'] },
+  });
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+
+  // toolFilter：只放行 global 基础三件
+  assert.deepEqual(harness.startCalls[0].options.toolFilter.allow, [
+    'inject_context_read',
+    'inject_user_inputs',
+    'inject_deliver',
+  ]);
+
+  // guard：全局 subagent + 规则 web_search 都放行，不在名单里的仍拒绝
+  const guard = harness.childGuards[0];
+  assert.equal(guard.fn({ name: 'subagent' }), undefined);
+  assert.equal(guard.fn({ name: 'web_search' }), undefined);
+  assert.match(String(guard.fn({ name: 'list_agents' })), /只允许调用/);
+});
+
+test('rule-level extraTools persist through createTask/updateTask', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    subagentScript: async () => {},
+  });
+  // 经 RPC 创建规则，带规则级 extraTools
+  const route = harness.getRoute();
+  const call = (body) => new Promise((resolve, reject) => {
+    const req = (async function* iterate() { yield Buffer.from(JSON.stringify(body)); })();
+    const res = {
+      headers: {},
+      setHeader(k, v) { this.headers[k] = v; },
+      end(text) { resolve({ status: this.statusCode, body: JSON.parse(text) }); },
+    };
+    route.handler(req, res).catch(reject);
+  });
+  const created = await call({ method: 'tasks/create', args: {
+    sessionId: ROOT_ID,
+    name: '带工具规则',
+    systemPrompt: '',
+    enabled: true,
+    maxChain: 0,
+    extraTools: ['subagent'],
+  } });
+  assert.equal(created.body.ok, true);
+  assert.deepEqual(created.body.value.extraTools, ['subagent']);
+
+  // 存盘确认
+  const state = readState(harness.stateFile);
+  const task = Object.values(state.tasks).find((t) => t.id === created.body.value.id);
+  assert.deepEqual(task.extraTools, ['subagent']);
+
+  // 更新后替换
+  const updated = await call({ method: 'tasks/update', args: { id: created.body.value.id, patch: { extraTools: ['web_search'] } } });
+  assert.equal(updated.body.ok, true);
+  assert.deepEqual(updated.body.value.extraTools, ['web_search']);
 });
 
 test('configured reasoningEffort rides along in the subagent agentOptions', async () => {

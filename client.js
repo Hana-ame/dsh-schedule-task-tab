@@ -111,6 +111,9 @@ window.__ModuleLoader__.load({
       'task.chain': '注入链上限',
       'task.chain.unit': '轮',
       'task.chain.hint': '注入唤醒的下一轮也继续审阅。填 0 = 不限（默认）：无限 loop，链的唯一出口是审阅子代理判断无需注入。想加保险丝就填正整数：连续注入达到该轮数后本轮停止审阅。',
+      'task.tools': '额外放行的工具',
+      'task.tools.placeholder': '例如：subagent（留空 = 只放行 inject_* 三个）',
+      'task.tools.hint': '审阅子代理默认只能调用 inject_context_read / inject_user_inputs / inject_deliver。需要它创建子智能体等更多能力时，在这里填工具名，多个用英文逗号分隔；会叠加到全局配置之上。',
       'created.reviewed.injected': '规则已创建，并已立即审阅当前对话（本次有提醒注入）',
       'created.reviewed.skipped': '规则已创建，并已立即审阅当前对话（本次判断无需提醒）',
       'run.status.notRun': '未执行',
@@ -222,6 +225,9 @@ window.__ModuleLoader__.load({
       'task.chain': 'Injection chain limit',
       'task.chain.unit': 'turns',
       'task.chain.hint': 'Turns woken by our own injection keep getting reviewed. 0 = unlimited (default): the only exit is the reviewer deciding nothing needs injecting. Set a positive number as a fuse: stop after that many consecutive injections.',
+      'task.tools': 'Extra allowed tools',
+      'task.tools.placeholder': 'e.g. subagent (empty = only the inject_* trio)',
+      'task.tools.hint': 'A review subagent may only call inject_context_read / inject_user_inputs / inject_deliver by default. To grant more capability (e.g. creating sub-agents), list tool names here, comma-separated; they add on top of the global config.',
       'created.reviewed.injected': 'Rule created and the current conversation was reviewed right away (this round it was nudged)',
       'created.reviewed.skipped': 'Rule created and the current conversation was reviewed right away (nothing to nudge this round)',
       'run.status.notRun': 'Not run',
@@ -652,6 +658,7 @@ window.__ModuleLoader__.load({
       const [reasoningEffort, setReasoningEffort] = react.useState(initial?.reasoningEffort ?? '');
       const [systemPrompt, setSystemPrompt] = react.useState(initial?.systemPrompt ?? '');
       const [maxChain, setMaxChain] = react.useState(String(initial?.maxChain ?? 0));
+      const [extraToolsText, setExtraToolsText] = react.useState(Array.isArray(initial?.extraTools) ? initial.extraTools.join(', ') : '');
       const [enabled, setEnabled] = react.useState(initial?.enabled ?? true);
       const [templateId, setTemplateId] = react.useState('');
       const [showTemplates, setShowTemplates] = react.useState(false);
@@ -725,6 +732,7 @@ window.__ModuleLoader__.load({
             systemPrompt,
             maxChain,
             enabled,
+            extraTools: extraToolsText.split(',').map((s) => s.trim()).filter(Boolean),
           });
         } finally {
           setSaving(false);
@@ -809,6 +817,17 @@ window.__ModuleLoader__.load({
               jsx('span', { className: 'inj-hint', children: t('task.chain.unit') }),
             ] }),
             jsx('div', { className: 'inj-hint', children: t('task.chain.hint') }),
+          ] }),
+          jsxs('div', { className: 'inj-field full', children: [
+            jsx('label', { className: 'inj-label', children: t('task.tools') }),
+            jsx('input', {
+              className: 'inj-input',
+              value: extraToolsText,
+              onChange: (e) => setExtraToolsText(e.target.value),
+              placeholder: t('task.tools.placeholder'),
+              'aria-label': t('task.tools'),
+            }),
+            jsx('div', { className: 'inj-hint', children: t('task.tools.hint') }),
           ] }),
         ] }),
 
@@ -952,6 +971,7 @@ window.__ModuleLoader__.load({
                 systemPrompt: form.systemPrompt,
                 maxChain: form.maxChain,
                 enabled: form.enabled,
+                extraTools: form.extraTools,
               },
             });
             flash('ok', t('updated'));
@@ -965,6 +985,7 @@ window.__ModuleLoader__.load({
               systemPrompt: form.systemPrompt,
               maxChain: form.maxChain,
               enabled: form.enabled,
+              extraTools: form.extraTools,
               // 建规则时把「之前已经发生的这轮对话」也补审一次，不用等下一条人类消息。
               reviewNow: true,
             });
