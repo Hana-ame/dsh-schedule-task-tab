@@ -2,7 +2,7 @@
 
 DSH Web 插件：**每次主会话一轮对话结束后，自动启动子代理审阅对话内容，判断是否需要注入主会话唤醒主 agent。**
 
-> **v3.6.4：审阅子代理工具白名单可配置（全局 + 规则级）**
+> **v3.6.5：审阅子代理工具白名单可配置（全局 + 规则级）**
 >
 > 默认审阅子代理只允许 `inject_context_read` / `inject_user_inputs` / `inject_deliver`。
 > 放行额外工具（例如让审阅子代理自己创建子智能体 `subagent`）有**两层**配置，叠加生效：
@@ -10,8 +10,8 @@ DSH Web 插件：**每次主会话一轮对话结束后，自动启动子代理�
 > 1. **全局**（profile patch 的插件配置 `reviewExtraTools`，对所有规则生效）：
 >    ```yaml
 >    - insert:
->        - id: schedule-task-tab-v364
->          name: 'file:///home/lumin/.dsh/plugins/dsh-schedule-task-tab/index.js?rev=3.6.4'
+>        - id: schedule-task-tab-v365
+>          name: 'file:///home/lumin/.dsh/plugins/dsh-schedule-task-tab/index.js?rev=3.6.5'
 >          config:
 >            reviewExtraTools:
 >              - subagent
@@ -22,6 +22,10 @@ DSH Web 插件：**每次主会话一轮对话结束后，自动启动子代理�
 > scoped 工具（如 preset 带入的 `subagent` / `list_agents`）塞进去会直接抛
 > `unknown global tools`；所以 toolFilter 只放行基础 inject_* 三件，额外工具（含 scoped）
 > 走 **child-scope guard** 放行（`tools.guard` 对 global 与 scoped 统一生效）。
+>
+> **v3.6.5 修复（inject 工具空 sessionId 回退）**：审阅子代理调用 `inject_context_read` /
+> `inject_user_inputs` / `inject_deliver` 时若不传 / 传空 `sessionId`，插件会回退绑定到
+> 唯一活跃审阅任务（同一时刻只有一个审阅在跑）。默认审阅指令已提示 sessionId 可留空。
 >
 > 不配置时行为与旧版完全一致（只有三个注入工具）。白名单只做追加与去重，
 > 非法值（非字符串/空串）静默忽略；基础三个工具不可移除。

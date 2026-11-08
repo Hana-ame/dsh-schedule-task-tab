@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.6.4';
+export const version = '3.6.5';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
@@ -323,7 +323,7 @@ export function defaultReviewPrompt(task, trigger) {
     `1. 调用 inject_context_read(sessionId="${task.sessionId}", maxMessages=20) 读取主会话最近的对话内容（用户要求、主 agent 的回复、关键工具结果）。`,
     `2. 需要核对「用户到底要求过什么」时，调用 inject_user_inputs(sessionId="${task.sessionId}") 拿**所有人类 user input 的完整清单**——它是全量的，能发现滚动窗口里已经滚出去的早期需求。拿用户原话和主 agent 的实际产出逐条对照，找出被漏掉或曲解的要求。`,
     '3. 判断是否存在值得让主 agent 继续推进的实质信息：未完成的待办、被忽略的用户要求、需要拍板的选择、明显的错误或风险、可以立刻执行的下一步。',
-    '4. 若需要注入：调用 inject_deliver 提交内容，精炼、具体、可执行，直接说明要推进的目标与动作；若没有实质信息：不要调用 inject_deliver（本轮就不注入）。',
+    '4. 若需要注入：调用 inject_deliver 提交内容（sessionId 可留空，插件会自动绑定本次审阅任务），精炼、具体、可执行，直接说明要推进的目标与动作；若没有实质信息：不要调用 inject_deliver（本轮就不注入）。',
     '5. 独立验证，不要只信主 agent 的自我汇报：它说「已完成/已上线/测试通过」时，看工具结果与文件/命令输出，别被口头的状态形容词骗过去。',
     '',
     `本轮结束信息：${turn}，结束原因 ${trigger?.reason ?? 'unknown'}。`,
@@ -559,7 +559,17 @@ export function apply(ctx, config = {}) {
   /* ── 工具定义（供审阅子代理）────────────────────────────────────── */
 
   function requireActiveSession(sessionId) {
-    const run = activeRuns.get(String(sessionId ?? ''));
+    const requested = String(sessionId ?? '').trim();
+    // 子代理没传 / 传空 sessionId 时回退到唯一活跃运行：同一时刻只有一个审阅在跑，
+    // activeRuns 里至多一个条目（多规则按队列串行），不会歧义。
+    // 命中它也能让审阅子代理自己再调 subagent 等工具时不受影响。
+    if (!requested) {
+      const fallback = [...activeRuns.values()];
+      if (fallback.length === 1) return fallback[0];
+      if (fallback.length === 0) throw new Error('没有进行中的审阅任务');
+      throw new Error('未指定 sessionId 且存在多个进行中的审阅任务，请显式传 sessionId');
+    }
+    const run = activeRuns.get(requested);
     if (!run) throw new Error('没有进行中的审阅任务');
     return run;
   }

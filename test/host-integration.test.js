@@ -256,6 +256,30 @@ test('turn/end on a root session triggers a review subagent (no injection path)'
   assert.equal(harness.promptCalls.length, 0, 'no-inject review must not wake the main session');
 });
 
+test('inject tools fall back to the single active run when sessionId is empty', async () => {
+  // 复现：审阅子代理调用 inject_deliver 时没传 sessionId（或传空）→ 以前抛
+  // 「没有进行中的审阅任务」。修后应回退到唯一活跃运行，正常接受。
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask() },
+    subagentScript: async ({ tools }) => {
+      const read = await tools.get('inject_context_read').execute({ sessionId: '', maxMessages: 3 });
+      assert.ok(read.text.includes('帮我完成插件改造'), 'empty sessionId must fall back to the active run');
+      const result = await tools.get('inject_deliver').execute({ content: '继续推进。' });
+      assert.deepEqual(result, { accepted: true });
+    },
+  });
+
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+
+  const state = readState(harness.stateFile);
+  assert.equal(state.runs[0].status, 'ok');
+  assert.equal(state.runs[0].injected, true, 'injection must land via the fallback active run');
+  assert.equal(harness.promptCalls.length, 1, 'main session must be woken once');
+  assert.match(harness.promptCalls[0].content[0].text, /继续推进/);
+});
+
 test('review injection wakes the main session and the injected turn is reviewed again (v3.4)', async () => {
   // 旧行为（≤3.3.1）：注入唤醒的那一轮被直接跳过 → 每条人类消息最多注入一次，
   // 用户看到的就是「只审阅一次」。v3.4 起注入轮继续审阅（受链上限约束）。
