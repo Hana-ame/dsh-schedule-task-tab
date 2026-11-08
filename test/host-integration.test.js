@@ -66,7 +66,7 @@ function waitFor(predicate, timeoutMs = 2000) {
  * `sessionMeta` / `sessionEvents` let a test model parent/child sessions (fork
  * version branches vs. genuine subagent children).
  */
-function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spawn'], sessionMeta = {}, sessionEvents = {} } = {}) {
+function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spawn'], sessionMeta = {}, sessionEvents = {}, pluginConfig = {} } = {}) {
   const stateFile = seedState(baseDir, tasks);
   // 存储路径优先用 DSH_HOME（跨重载稳定）；测试里指向临时目录，避免读写真实状态。
   const previousHome = process.env.DSH_HOME;
@@ -170,7 +170,7 @@ function createHarness({ baseDir, tasks = {}, subagentScript, providers = ['spaw
     },
   };
 
-  apply(ctx);
+  apply(ctx, pluginConfig);
 
   const rootSession = { id: ROOT_ID, header: {}, seq: 2, snapshotEvents: () => [] };
   const subSession = { id: SUB_ID, header: { origin: 'subagent', delegationDepth: 1 }, seq: 2, snapshotEvents: () => [] };
@@ -539,6 +539,51 @@ test('review subagent gets a child-scope guard for the two injection tools only'
   assert.equal(guard.fn({ name: 'inject_deliver' }), undefined);
   assert.match(String(guard.fn({ name: 'list_agents' })), /只允许调用/);
   assert.equal(guard.active, false, 'guard must be released when the review run settles');
+});
+
+test('reviewExtraTools config appends to both the child-scope guard and the toolFilter', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask() },
+    subagentScript: async () => {},
+    pluginConfig: { reviewExtraTools: ['subagent'] },
+  });
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+
+  // toolFilter：spawn 选项里必须带上追加的工具
+  assert.equal(harness.startCalls.length, 1, 'one review subagent must start');
+  assert.deepEqual(harness.startCalls[0].options.toolFilter.allow, [
+    'inject_context_read',
+    'inject_user_inputs',
+    'inject_deliver',
+    'subagent',
+  ]);
+
+  // child-scope guard：追加的工具放行，未追加的仍然拒绝
+  assert.equal(harness.childGuards.length, 1, 'one guard must be armed on the review child');
+  const guard = harness.childGuards[0];
+  assert.equal(guard.fn({ name: 'subagent' }), undefined, 'subagent must be allowed via reviewExtraTools');
+  assert.match(String(guard.fn({ name: 'list_agents' })), /只允许调用/);
+  assert.equal(guard.active, false, 'guard must be released when the review run settles');
+});
+
+test('invalid reviewExtraTools values are ignored and base tools stay intact', async () => {
+  const harness = createHarness({
+    baseDir: makeTempDir(),
+    tasks: { 'task-1': baseTask() },
+    subagentScript: async () => {},
+    pluginConfig: { reviewExtraTools: ['subagent', '', 42, 'subagent'] },
+  });
+  harness.turnEnd(harness.rootSession);
+  await waitFor(() => readState(harness.stateFile).runs.length === 1);
+
+  assert.deepEqual(harness.startCalls[0].options.toolFilter.allow, [
+    'inject_context_read',
+    'inject_user_inputs',
+    'inject_deliver',
+    'subagent',
+  ]);
 });
 
 test('configured reasoningEffort rides along in the subagent agentOptions', async () => {

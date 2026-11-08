@@ -22,7 +22,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 export const name = 'schedule-task-tab';
-export const version = '3.6.0';
+export const version = '3.6.1';
 export const inject = [];
 
 const ROUTE_PATH = '/api/inject-manager';
@@ -41,7 +41,26 @@ const DEFAULT_MAX_CHAIN = 0;
 const MAX_KEPT_RUNS = 200;
 /** 注入消息的固定前缀：用于识别“这一轮是注入唤醒的”，避免审阅无限自触发。 */
 const INJECT_PREFIX = '[注入·';
-const SUBAGENT_TOOLS = ['inject_context_read', 'inject_user_inputs', 'inject_deliver'];
+/**
+ * 审阅子代理的**基础**工具白名单（不可关闭）：读取主会话上下文 / 读全部 user input /
+ * 提交注入。`config.reviewExtraTools` 可以**追加**额外工具（如 `subagent`），
+ * 一并作用于 child-scope guard 与 subagents.start 的 toolFilter。
+ */
+const SUBAGENT_BASE_TOOLS = ['inject_context_read', 'inject_user_inputs', 'inject_deliver'];
+/** 归一化用户配置的额外白名单工具：只看合法、去重；非法值忽略（不报错）。 */
+const normalizeExtraTools = (value) => {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set(SUBAGENT_BASE_TOOLS);
+  const extra = [];
+  for (const item of value) {
+    if (typeof item !== 'string' || !item.trim()) continue;
+    const name = item.trim();
+    if (seen.has(name)) continue;
+    seen.add(name);
+    extra.push(name);
+  }
+  return extra;
+};
 /** turn/end 原因中属于日志修复/分叉种子生成的合成事件，不是真实对话结束。 */
 const SYNTHETIC_TURN_END = new Set(['interrupted', 'forked']);
 /** 重建注入判断时最多回看的最近事件数（插件中途重载、丢失增量状态时的兜底）。 */
@@ -370,7 +389,12 @@ export function decideTurnReview({ header, event, tracked, fallbackInjected, max
 
 /* ── Plugin body ─────────────────────────────────────────────────────── */
 
-export function apply(ctx) {
+export function apply(ctx, config = {}) {
+  /**
+   * 本实例生效的审阅子代理工具白名单 = 基础三件 + 用户配置的额外工具。
+   * 同时约束 child-scope guard 与 subagents.start 的 toolFilter。
+   */
+  const reviewTools = [...SUBAGENT_BASE_TOOLS, ...normalizeExtraTools(config.reviewExtraTools)];
   const file = storageFile(ctx);
   let state = readState(file);
   const persist = () => { try { writeState(state, file); } catch { /* best effort */ } };
@@ -687,10 +711,11 @@ export function apply(ctx) {
   }
 
   /**
-   * 审阅子代理只允许调用 SUBAGENT_TOOLS。toolFilter 只能遮住 global 工具，
-   * agent preset 带下来的 scoped 工具（list_agents / subagent / ...）不受它约束；
-   * 这里在 child agent 的 scope 上补一道 guard（tools.guard 注册在 agent.ctx 时
-   * 只作用于该 agent），越权调用会被拒绝并给出原因。
+   * 审阅子代理只允许调用 reviewTools（基础三件 + config.reviewExtraTools）。
+   * toolFilter 只能遮住 global 工具，agent preset 带下来的 scoped 工具
+   * （list_agents / subagent / ...）不受它约束；这里在 child agent 的 scope 上
+   * 补一道 guard（tools.guard 注册在 agent.ctx 时只作用于该 agent），
+   * 越权调用会被拒绝并给出原因。
    *
    * @param childId - 刚启动的审阅子代理 session id
    * @returns 解除 guard 的 disposer；拿不到 child/guard 时返回空 disposer
@@ -702,9 +727,9 @@ export function apply(ctx) {
       if (!childTools || typeof childTools.guard !== 'function') return () => {};
       return childTools.guard((exec) => {
         const called = String(exec?.name ?? 'unknown');
-        return SUBAGENT_TOOLS.includes(called)
+        return reviewTools.includes(called)
           ? undefined
-          : `审阅子代理只允许调用 ${SUBAGENT_TOOLS.join(' / ')}，禁止调用 ${called}`;
+          : `审阅子代理只允许调用 ${reviewTools.join(' / ')}，禁止调用 ${called}`;
       });
     } catch {
       return () => {};
@@ -783,7 +808,7 @@ export function apply(ctx) {
               ...(task.reasoningEffort ? { reasoningEffort: task.reasoningEffort } : {}),
             } }
           : {}),
-        toolFilter: { allow: SUBAGENT_TOOLS },
+        toolFilter: { allow: reviewTools },
       });
       const subagentId = started.id; // 子代理会话：UI 可跳回去看真实过程
       // toolFilter 之外再补一道 child-scope guard（挡住 preset 带下来的 scoped 工具）。
